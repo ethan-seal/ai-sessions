@@ -955,97 +955,6 @@ function cmdBackup(args: string[]) {
   console.log();
 }
 
-function cmdBackupSchedule() {
-  const unitDir = join(HOME, ".config", "systemd", "user");
-  mkdirSync(unitDir, { recursive: true });
-
-  // Resolve the path to this tool
-  const bunPath = process.argv[0];
-  const scriptPath = join(process.cwd(), "src", "index.ts");
-
-  const serviceContent = `[Unit]
-Description=AI Sessions Backup
-
-[Service]
-Type=oneshot
-ExecStart=${bunPath} ${scriptPath} backup
-`;
-
-  const timerContent = `[Unit]
-Description=Daily AI Sessions Backup
-
-[Timer]
-OnCalendar=daily
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-`;
-
-  const servicePath = join(unitDir, "ai-sessions-backup.service");
-  const timerPath = join(unitDir, "ai-sessions-backup.timer");
-
-  Bun.write(servicePath, serviceContent);
-  Bun.write(timerPath, timerContent);
-
-  try {
-    execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-    execSync("systemctl --user enable --now ai-sessions-backup.timer", { stdio: "pipe" });
-  } catch (e: any) {
-    console.error(`Error enabling timer: ${e.message}`);
-    process.exit(1);
-  }
-
-  console.log(`\nInstalled systemd user timer:`);
-  console.log(`  Service: ${tildify(servicePath)}`);
-  console.log(`  Timer:   ${tildify(timerPath)}`);
-  console.log();
-
-  try {
-    const status = execSync("systemctl --user status ai-sessions-backup.timer", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    console.log(status);
-  } catch (e: any) {
-    // systemctl status exits non-zero when inactive, but still prints useful output
-    if (e.stdout) console.log(e.stdout);
-  }
-}
-
-function cmdBackupUnschedule() {
-  const unitDir = join(HOME, ".config", "systemd", "user");
-  const servicePath = join(unitDir, "ai-sessions-backup.service");
-  const timerPath = join(unitDir, "ai-sessions-backup.timer");
-
-  try {
-    execSync("systemctl --user disable --now ai-sessions-backup.timer", { stdio: "pipe" });
-  } catch {
-    // may not be enabled
-  }
-
-  let removed = false;
-  if (existsSync(servicePath)) {
-    unlinkSync(servicePath);
-    removed = true;
-  }
-  if (existsSync(timerPath)) {
-    unlinkSync(timerPath);
-    removed = true;
-  }
-
-  if (removed) {
-    try {
-      execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-    } catch {
-      // non-critical
-    }
-    console.log("Backup timer uninstalled.");
-  } else {
-    console.log("No backup timer was installed.");
-  }
-}
-
 function cmdRestore(args: string[]) {
   const force = args.includes("--force");
 
@@ -1171,13 +1080,7 @@ function main() {
     }
     cmdResume(args[1]);
   } else if (command === "backup") {
-    if (args[1] === "schedule") {
-      cmdBackupSchedule();
-    } else if (args[1] === "unschedule") {
-      cmdBackupUnschedule();
-    } else {
-      cmdBackup(args.slice(1));
-    }
+    cmdBackup(args.slice(1));
   } else if (command === "restore") {
     cmdRestore(args.slice(1));
   } else if (command === "help" || command === "--help" || command === "-h") {
@@ -1197,8 +1100,6 @@ Backup & Restore:
   backup              Create a tar.gz backup of all session data
     --dest <dir>        Backup destination (default: ~/.ai-sessions-backups/)
     --keep <n>          Retention: keep last n backups (default: 10)
-  backup schedule     Install a systemd user timer for daily backups
-  backup unschedule   Remove the systemd backup timer
   restore             List available backups
     --dest <dir>        Backup directory to list from
   restore <archive>   Show what a backup would restore
