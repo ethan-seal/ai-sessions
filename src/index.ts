@@ -133,6 +133,137 @@ function cleanMessageContent(content: unknown): string {
   return "";
 }
 
+/**
+ * Extract all searchable text from a Claude JSONL record.
+ * Handles string content, text blocks, tool_use blocks (stringifies input),
+ * and tool_result blocks (extracts text content).
+ * Returns { text, role } where role is "user", "assistant", or "tool".
+ */
+function extractSearchableText(record: any): { text: string; role: string } | null {
+  if (record.isMeta) return null;
+
+  const msgContent = record.message?.content;
+  if (!msgContent) return null;
+
+  let role: string;
+  if (record.type === "user") {
+    role = "user";
+  } else if (record.type === "assistant") {
+    role = "assistant";
+  } else {
+    return null;
+  }
+
+  const parts: string[] = [];
+
+  if (typeof msgContent === "string") {
+    parts.push(msgContent);
+  } else if (Array.isArray(msgContent)) {
+    for (const block of msgContent) {
+      if (block.type === "text" && block.text) {
+        parts.push(block.text);
+      } else if (block.type === "tool_use" && block.input) {
+        // Mark role as tool for tool_use matches
+        // Stringify input to make all fields searchable (code, file paths, commands, etc.)
+        try {
+          parts.push(JSON.stringify(block.input));
+        } catch {
+          // skip if not serializable
+        }
+        if (block.name) {
+          parts.push(block.name);
+        }
+      } else if (block.type === "tool_result") {
+        // tool_result content can be a string or array of text blocks
+        if (typeof block.content === "string") {
+          parts.push(block.content);
+        } else if (Array.isArray(block.content)) {
+          for (const sub of block.content) {
+            if (sub.type === "text" && sub.text) {
+              parts.push(sub.text);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const text = parts.join("\n");
+  if (!text.trim()) return null;
+
+  // Determine if the match is in tool content — check if non-text blocks contributed
+  let hasToolContent = false;
+  if (Array.isArray(msgContent)) {
+    hasToolContent = msgContent.some(
+      (block: any) => block.type === "tool_use" || block.type === "tool_result"
+    );
+  }
+
+  // If the record is an assistant message with tool content, we'll refine the role
+  // after the caller checks which part actually matched
+  return { text, role: hasToolContent && role === "assistant" ? "assistant" : role };
+}
+
+/**
+ * Determine the specific role label for a search match within a record.
+ * Returns "tool" if the match is found in tool_use/tool_result blocks,
+ * otherwise returns the message role.
+ */
+function matchRoleInRecord(record: any, lower: string): string | null {
+  if (record.isMeta) return null;
+
+  const msgContent = record.message?.content;
+  if (!msgContent) return null;
+
+  const baseRole = record.type === "user" ? "user" : record.type === "assistant" ? "assistant" : null;
+  if (!baseRole) return null;
+
+  if (typeof msgContent === "string") {
+    return msgContent.toLowerCase().includes(lower) ? baseRole : null;
+  }
+
+  if (Array.isArray(msgContent)) {
+    // Check text blocks first
+    for (const block of msgContent) {
+      if (block.type === "text" && block.text && block.text.toLowerCase().includes(lower)) {
+        return baseRole;
+      }
+    }
+    // Check tool_use blocks
+    for (const block of msgContent) {
+      if (block.type === "tool_use") {
+        if (block.name && block.name.toLowerCase().includes(lower)) {
+          return "tool";
+        }
+        if (block.input) {
+          try {
+            if (JSON.stringify(block.input).toLowerCase().includes(lower)) {
+              return "tool";
+            }
+          } catch {}
+        }
+      }
+    }
+    // Check tool_result blocks
+    for (const block of msgContent) {
+      if (block.type === "tool_result") {
+        if (typeof block.content === "string" && block.content.toLowerCase().includes(lower)) {
+          return "tool";
+        }
+        if (Array.isArray(block.content)) {
+          for (const sub of block.content) {
+            if (sub.type === "text" && sub.text && sub.text.toLowerCase().includes(lower)) {
+              return "tool";
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function isMetaOrCommand(text: string): boolean {
   return (
     text.startsWith("<command-name>") ||
@@ -366,9 +497,9 @@ function cmdList(filter?: string) {
 
 function cmdSearch(term: string) {
   const lower = term.toLowerCase();
-  const matches: { session: Session; matchLine: string }[] = [];
+  const matches: { session: Session; matchLine: string; role: string }[] = [];
 
-  // Search Claude sessions
+  // Search Claude sessions — all record types (user, assistant, tool)
   for (const session of getClaudeSessions()) {
     let data: string;
     try {
@@ -385,16 +516,21 @@ function cmdSearch(term: string) {
       } catch {
         continue;
       }
-      if (record.type !== "user" || record.isMeta) continue;
-      const text = cleanMessageContent(record.message?.content);
-      if (text.toLowerCase().includes(lower)) {
-        matches.push({ session, matchLine: text.replace(/\n/g, " ").trim() });
-        break;
+      if (record.isMeta) continue;
+
+      // Use matchRoleInRecord to find the match and determine the specific role
+      const role = matchRoleInRecord(record, lower);
+      if (role) {
+        // Extract readable text for display context
+        const extracted = extractSearchableText(record);
+        const displayText = extracted ? extracted.text.replace(/\n/g, " ").trim() : "";
+        matches.push({ session, matchLine: displayText, role });
+        break; // first match per session for performance
       }
     }
   }
 
-  // Search OpenCode sessions
+  // Search OpenCode sessions — all message roles
   if (existsSync(OPENCODE_DB)) {
     let db: Database | null = null;
     try {
@@ -406,12 +542,12 @@ function cmdSearch(term: string) {
           s.title,
           s.time_created,
           s.time_updated,
+          json_extract(m.data, '$.role') as match_role,
           json_extract(p.data, '$.text') as match_text
         FROM session s
         JOIN message m ON m.session_id = s.id
         JOIN part p ON p.message_id = m.id
         WHERE s.time_archived IS NULL
-          AND json_extract(m.data, '$.role') = 'user'
           AND json_extract(p.data, '$.type') = 'text'
           AND json_extract(p.data, '$.text') LIKE $pattern
         GROUP BY s.id
@@ -419,6 +555,7 @@ function cmdSearch(term: string) {
       `).all({ $pattern: `%${term}%` }) as any[];
 
       for (const r of rows) {
+        const role = r.match_role === "user" ? "user" : "assistant";
         matches.push({
           session: {
             id: r.id,
@@ -432,6 +569,7 @@ function cmdSearch(term: string) {
             cwd: r.directory,
           },
           matchLine: (r.match_text as string).replace(/\n/g, " ").trim(),
+          role,
         });
       }
     } catch {
@@ -449,13 +587,13 @@ function cmdSearch(term: string) {
   console.log(
     `\nFound ${matches.length} session${matches.length !== 1 ? "s" : ""} matching "${term}":\n`
   );
-  for (const { session, matchLine } of matches) {
+  for (const { session, matchLine, role } of matches) {
     const date = formatDate(session.startTime);
     const id = shortId(session.id);
     const tag = sourceTag(session.source);
     const preview = truncate(matchLine, 100);
     console.log(`  ${date}  ${id}  ${tag} ${session.projectDir}`);
-    console.log(`    "${preview}"`);
+    console.log(`    [${role}] "${preview}"`);
     console.log();
   }
 }

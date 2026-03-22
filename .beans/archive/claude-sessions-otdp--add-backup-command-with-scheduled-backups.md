@@ -1,11 +1,11 @@
 ---
 # claude-sessions-otdp
 title: Add backup command with scheduled backups
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-03-22T17:39:53Z
-updated_at: 2026-03-22T17:41:00Z
+updated_at: 2026-03-22T17:44:26Z
 ---
 
 Session data in ~/.claude/projects/ (JSONL) and ~/.local/share/opencode/opencode.db (SQLite) are the only copies of session history. Add a 'backup' subcommand that:
