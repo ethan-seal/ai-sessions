@@ -1,0 +1,7 @@
+[Unit]
+Description=AI Sessions Backup
+
+[Service]
+Type=oneshot
+# Adjust the path below to match your installation
+ExecStart=%h/.bun/bin/bun %h/Programming/claude-sessions/src/index.ts backup
