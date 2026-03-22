@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import { Database } from "bun:sqlite";
 
 // --- Types ---
@@ -118,6 +118,64 @@ function formatDateShort(iso: string): string {
 
 function sourceTag(source: Source): string {
   return source === "claude" ? "[claude]" : "[opencode]";
+}
+
+function outputViaPager(content: string): void {
+  if (!process.stdout.isTTY) {
+    process.stdout.write(content);
+    return;
+  }
+
+  const pagerCmd = process.env.PAGER || "less -R";
+  const parts = pagerCmd.split(/\s+/);
+  const cmd = parts[0];
+  const pagerArgs = parts.slice(1);
+
+  const result = spawnSync(cmd, pagerArgs, {
+    input: content,
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+
+  // If pager failed (e.g., less not found), fall back to direct output
+  if (result.status !== 0 && result.status !== null) {
+    process.stdout.write(content);
+  }
+}
+
+function formatMessageHeader(role: string, time: string): string {
+  const label = `── ${role} [${time}] `;
+  const padLen = Math.max(0, 60 - label.length);
+  return label + "─".repeat(padLen);
+}
+
+function formatToolUse(block: any): string {
+  const lines: string[] = [];
+  const toolName = block.name || "unknown_tool";
+  lines.push(`  [tool_use: ${toolName}]`);
+
+  if (block.input && typeof block.input === "object") {
+    for (const [key, value] of Object.entries(block.input)) {
+      let display: string;
+      if (typeof value === "string") {
+        // For long strings, show first 200 chars
+        if (value.length > 200) {
+          display = value.slice(0, 200) + "...";
+        } else {
+          display = value;
+        }
+        // Indent multiline values
+        display = display.split("\n").join("\n      ");
+      } else {
+        display = JSON.stringify(value);
+        if (display.length > 200) {
+          display = display.slice(0, 200) + "...";
+        }
+      }
+      lines.push(`    ${key}: ${display}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // --- Claude session parsing ---
@@ -598,7 +656,7 @@ function cmdSearch(term: string) {
   }
 }
 
-function cmdShow(sessionId: string) {
+function cmdShow(sessionId: string, short: boolean) {
   const sessions = getAllSessions();
   const session = sessions.find(
     (s) => s.id === sessionId || s.id.startsWith(sessionId)
@@ -609,22 +667,26 @@ function cmdShow(sessionId: string) {
     process.exit(1);
   }
 
-  console.log(`\nSession: ${session.id}`);
-  console.log(`Source:  ${session.source}`);
-  console.log(`Project: ${session.projectDir}`);
-  console.log(`Started: ${formatDate(session.startTime)}`);
-  if (session.title) console.log(`Title:   ${session.title}`);
-  console.log(`CWD:     ${session.cwd}`);
-  console.log(`${"─".repeat(60)}\n`);
+  const out: string[] = [];
+  out.push(`\nSession: ${session.id}`);
+  out.push(`Source:  ${session.source}`);
+  out.push(`Project: ${session.projectDir}`);
+  out.push(`Started: ${formatDate(session.startTime)}`);
+  if (session.title) out.push(`Title:   ${session.title}`);
+  out.push(`CWD:     ${session.cwd}`);
+  out.push(`${"─".repeat(60)}\n`);
 
   if (session.source === "claude") {
-    showClaudeSession(session);
+    showClaudeSession(session, short, out);
   } else {
-    showOpencodeSession(session);
+    showOpencodeSession(session, short, out);
   }
+
+  const content = out.join("\n") + "\n";
+  outputViaPager(content);
 }
 
-function showClaudeSession(session: Session) {
+function showClaudeSession(session: Session, short: boolean, out: string[]) {
   let data: string;
   try {
     data = readFileSync(session.filePath, "utf-8");
@@ -646,23 +708,53 @@ function showClaudeSession(session: Session) {
       const text = cleanMessageContent(record.message.content);
       if (isMetaOrCommand(text)) continue;
       const time = record.timestamp ? formatDate(record.timestamp) : "";
-      console.log(`[${time}] User:`);
-      console.log(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
-      console.log();
+
+      if (short) {
+        out.push(`[${time}] User:`);
+        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
+        out.push("");
+      } else {
+        out.push(formatMessageHeader("User", time));
+        out.push(text.trim());
+        out.push("");
+      }
     }
 
     if (record.type === "assistant" && record.message?.role === "assistant") {
-      const text = cleanMessageContent(record.message.content);
-      if (!text.trim()) continue;
       const time = record.timestamp ? formatDate(record.timestamp) : "";
-      console.log(`[${time}] Assistant:`);
-      console.log(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
-      console.log();
+      const msgContent = record.message.content;
+
+      if (short) {
+        const text = cleanMessageContent(msgContent);
+        if (!text.trim()) continue;
+        out.push(`[${time}] Assistant:`);
+        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
+        out.push("");
+      } else {
+        // Full mode: show text blocks and tool_use blocks
+        const parts: string[] = [];
+        if (typeof msgContent === "string") {
+          parts.push(msgContent);
+        } else if (Array.isArray(msgContent)) {
+          for (const block of msgContent) {
+            if (block.type === "text" && block.text) {
+              parts.push(block.text);
+            } else if (block.type === "tool_use") {
+              parts.push(formatToolUse(block));
+            }
+          }
+        }
+        const combined = parts.join("\n").trim();
+        if (!combined) continue;
+        out.push(formatMessageHeader("Assistant", time));
+        out.push(combined);
+        out.push("");
+      }
     }
   }
 }
 
-function showOpencodeSession(session: Session) {
+function showOpencodeSession(session: Session, short: boolean, out: string[]) {
   let db: Database;
   try {
     db = new Database(OPENCODE_DB, { readonly: true });
@@ -703,10 +795,17 @@ function showOpencodeSession(session: Session) {
 
       if (textParts.length === 0) continue;
 
-      const text = textParts.join("\n").replace(/\n/g, " ").trim();
-      console.log(`[${time}] ${role}:`);
-      console.log(`  ${truncate(text, 200)}`);
-      console.log();
+      if (short) {
+        const text = textParts.join("\n").replace(/\n/g, " ").trim();
+        out.push(`[${time}] ${role}:`);
+        out.push(`  ${truncate(text, 200)}`);
+        out.push("");
+      } else {
+        const text = textParts.join("\n").trim();
+        out.push(formatMessageHeader(role, time));
+        out.push(text);
+        out.push("");
+      }
     }
   } finally {
     db.close();
@@ -1057,11 +1156,14 @@ function main() {
     }
     cmdSearch(args.slice(1).join(" "));
   } else if (command === "show") {
-    if (!args[1]) {
-      console.error(`Usage: ${BIN_NAME} show <session-id>`);
+    const showArgs = args.slice(1);
+    const short = showArgs.includes("--short");
+    const sessionArg = showArgs.find((a) => !a.startsWith("--"));
+    if (!sessionArg) {
+      console.error(`Usage: ${BIN_NAME} show <session-id> [--short]`);
       process.exit(1);
     }
-    cmdShow(args[1]);
+    cmdShow(sessionArg, short);
   } else if (command === "resume") {
     if (!args[1]) {
       console.error(`Usage: ${BIN_NAME} resume <session-id>`);
@@ -1087,7 +1189,8 @@ Commands:
   (none)              List all sessions grouped by project
   list [filter]       List sessions, optionally filtered by project name
   search <term>       Full-text search across all session messages
-  show <session-id>   Show conversation overview for a session
+  show <session-id>   Show full conversation for a session
+    --short             Truncated overview (200 chars per message)
   resume <session-id> Resume a session in its original directory
 
 Backup & Restore:
