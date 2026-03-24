@@ -28,12 +28,99 @@ interface ProjectGroup {
   lastActive: string;
 }
 
+interface TextBlock {
+  type: "text";
+  text: string;
+}
+
+interface ToolUseBlock {
+  type: "tool_use";
+  name: string;
+  input: Record<string, unknown>;
+}
+
+interface ToolResultBlock {
+  type: "tool_result";
+  content: string | TextBlock[];
+}
+
+type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+
+interface JsonlRecord {
+  type: "user" | "assistant";
+  isMeta?: boolean;
+  sessionId?: string;
+  cwd?: string;
+  timestamp?: string;
+  message?: {
+    role: "user" | "assistant";
+    content: string | ContentBlock[];
+  };
+}
+
+interface OpencodeSessionRow {
+  id: string;
+  directory: string;
+  title: string | null;
+  time_created: number;
+  time_updated: number;
+  first_message: string | null;
+}
+
+interface OpencodeSearchRow {
+  id: string;
+  directory: string;
+  title: string | null;
+  time_created: number;
+  time_updated: number;
+  match_role: string;
+  match_text: string;
+}
+
+interface OpencodeMessageRow {
+  id: string;
+  data: string;
+  time_created: number;
+}
+
+interface OpencodePartRow {
+  data: string;
+}
+
 // --- Helpers ---
 
 const HOME = homedir();
 const CLAUDE_DIR = join(HOME, ".claude", "projects");
 const OPENCODE_DB = join(HOME, ".local", "share", "opencode", "opencode.db");
 const DEFAULT_BACKUP_DIR = join(HOME, ".ai-sessions-backups");
+
+const MAX_TOOL_INPUT_DISPLAY = 200;
+const MAX_LIST_LABEL = 70;
+const MAX_SEARCH_PREVIEW = 100;
+const MAX_SHORT_MESSAGE = 200;
+const HEADER_WIDTH = 60;
+
+function readJsonlRecords(filePath: string): JsonlRecord[] {
+  let data: string;
+  try {
+    data = readFileSync(filePath, "utf-8");
+  } catch {
+    return [];
+  }
+
+  const lines = data.split("\n").filter((l) => l.trim());
+  const records: JsonlRecord[] = [];
+
+  for (const line of lines) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      // Skip lines that fail to parse
+    }
+  }
+
+  return records;
+}
 
 function tildify(path: string): string {
   return path.startsWith(HOME) ? "~" + path.slice(HOME.length) : path;
@@ -44,49 +131,42 @@ function untildify(path: string): string {
 }
 
 function dirNameToPath(dirName: string): string {
-  const encoded = dirName.replace(/^-/, "");
-  const parts = encoded.split("-");
-  let resolved = "/";
+  const parts = dirName.replace(/^-/, "").split("-");
+  let path = "/";
   let i = 0;
 
   while (i < parts.length) {
-    if (parts[i] === "") {
+    const isDotfile = parts[i] === "";
+    if (isDotfile) {
       i++;
       if (i >= parts.length) break;
-      let matched = false;
-      for (let j = parts.length; j > i; j--) {
-        const segment = "." + parts.slice(i, j).join("-");
-        if (existsSync(join(resolved, segment))) {
-          resolved = join(resolved, segment);
-          i = j;
-          matched = true;
-          break;
-        }
-      }
-      if (!matched) {
-        resolved = join(resolved, "." + parts[i]);
-        i++;
-      }
-      continue;
     }
 
-    let matched = false;
-    for (let j = parts.length; j > i; j--) {
-      const segment = parts.slice(i, j).join("-");
-      if (existsSync(join(resolved, segment))) {
-        resolved = join(resolved, segment);
-        i = j;
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      resolved = join(resolved, parts[i]);
-      i++;
+    const segment = findLongestMatchingSegment(parts.slice(i), path, isDotfile);
+    path = join(path, segment.name);
+    i += segment.consumed;
+  }
+
+  return tildify(path);
+}
+
+function findLongestMatchingSegment(
+  parts: string[],
+  basePath: string,
+  isDotfile: boolean
+): { name: string; consumed: number } {
+  const prefix = isDotfile ? "." : "";
+
+  // Try to match longest possible segment first (greedy)
+  for (let len = parts.length; len > 0; len--) {
+    const name = prefix + parts.slice(0, len).join("-");
+    if (existsSync(join(basePath, name))) {
+      return { name, consumed: len };
     }
   }
 
-  return tildify(resolved);
+  // Fallback: use single part without filesystem match
+  return { name: prefix + parts[0], consumed: 1 };
 }
 
 function truncate(s: string, max: number): string {
@@ -144,35 +224,24 @@ function outputViaPager(content: string): void {
 
 function formatMessageHeader(role: string, time: string): string {
   const label = `── ${role} [${time}] `;
-  const padLen = Math.max(0, 60 - label.length);
+  const padLen = Math.max(0, HEADER_WIDTH - label.length);
   return label + "─".repeat(padLen);
 }
 
-function formatToolUse(block: any): string {
+function formatToolUse(block: ToolUseBlock): string {
   const lines: string[] = [];
   const toolName = block.name || "unknown_tool";
   lines.push(`  [tool_use: ${toolName}]`);
 
-  if (block.input && typeof block.input === "object") {
-    for (const [key, value] of Object.entries(block.input)) {
-      let display: string;
-      if (typeof value === "string") {
-        // For long strings, show first 200 chars
-        if (value.length > 200) {
-          display = value.slice(0, 200) + "...";
-        } else {
-          display = value;
-        }
-        // Indent multiline values
-        display = display.split("\n").join("\n      ");
-      } else {
-        display = JSON.stringify(value);
-        if (display.length > 200) {
-          display = display.slice(0, 200) + "...";
-        }
-      }
-      lines.push(`    ${key}: ${display}`);
-    }
+  for (const [key, value] of Object.entries(block.input)) {
+    const raw = typeof value === "string" ? value : JSON.stringify(value);
+    const truncated = raw.length > MAX_TOOL_INPUT_DISPLAY
+      ? raw.slice(0, MAX_TOOL_INPUT_DISPLAY) + "..."
+      : raw;
+    const display = typeof value === "string"
+      ? truncated.split("\n").join("\n      ")
+      : truncated;
+    lines.push(`    ${key}: ${display}`);
   }
 
   return lines.join("\n");
@@ -180,12 +249,12 @@ function formatToolUse(block: any): string {
 
 // --- Claude session parsing ---
 
-function cleanMessageContent(content: unknown): string {
+function cleanMessageContent(content: string | ContentBlock[]): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((block: any) => block.type === "text")
-      .map((block: any) => block.text)
+      .filter((block): block is TextBlock => block.type === "text")
+      .map((block) => block.text)
       .join("\n");
   }
   return "";
@@ -197,7 +266,7 @@ function cleanMessageContent(content: unknown): string {
  * and tool_result blocks (extracts text content).
  * Returns { text, role } where role is "user", "assistant", or "tool".
  */
-function extractSearchableText(record: any): { text: string; role: string } | null {
+function extractSearchableText(record: JsonlRecord): { text: string; role: string } | null {
   if (record.isMeta) return null;
 
   const msgContent = record.message?.content;
@@ -249,17 +318,7 @@ function extractSearchableText(record: any): { text: string; role: string } | nu
   const text = parts.join("\n");
   if (!text.trim()) return null;
 
-  // Determine if the match is in tool content — check if non-text blocks contributed
-  let hasToolContent = false;
-  if (Array.isArray(msgContent)) {
-    hasToolContent = msgContent.some(
-      (block: any) => block.type === "tool_use" || block.type === "tool_result"
-    );
-  }
-
-  // If the record is an assistant message with tool content, we'll refine the role
-  // after the caller checks which part actually matched
-  return { text, role: hasToolContent && role === "assistant" ? "assistant" : role };
+  return { text, role };
 }
 
 /**
@@ -267,7 +326,7 @@ function extractSearchableText(record: any): { text: string; role: string } | nu
  * Returns "tool" if the match is found in tool_use/tool_result blocks,
  * otherwise returns the message role.
  */
-function matchRoleInRecord(record: any, lower: string): string | null {
+function matchRoleInRecord(record: JsonlRecord, lower: string): string | null {
   if (record.isMeta) return null;
 
   const msgContent = record.message?.content;
@@ -280,42 +339,24 @@ function matchRoleInRecord(record: any, lower: string): string | null {
     return msgContent.toLowerCase().includes(lower) ? baseRole : null;
   }
 
-  if (Array.isArray(msgContent)) {
-    // Check text blocks first
-    for (const block of msgContent) {
-      if (block.type === "text" && block.text && block.text.toLowerCase().includes(lower)) {
-        return baseRole;
-      }
+  if (!Array.isArray(msgContent)) return null;
+
+  // Text blocks get priority — check them first
+  if (msgContent.some((b) => b.type === "text" && b.text && b.text.toLowerCase().includes(lower))) {
+    return baseRole;
+  }
+
+  // Then check tool content
+  for (const block of msgContent) {
+    if (block.type === "tool_use") {
+      if (block.name?.toLowerCase().includes(lower)) return "tool";
+      try {
+        if (JSON.stringify(block.input).toLowerCase().includes(lower)) return "tool";
+      } catch {}
     }
-    // Check tool_use blocks
-    for (const block of msgContent) {
-      if (block.type === "tool_use") {
-        if (block.name && block.name.toLowerCase().includes(lower)) {
-          return "tool";
-        }
-        if (block.input) {
-          try {
-            if (JSON.stringify(block.input).toLowerCase().includes(lower)) {
-              return "tool";
-            }
-          } catch {}
-        }
-      }
-    }
-    // Check tool_result blocks
-    for (const block of msgContent) {
-      if (block.type === "tool_result") {
-        if (typeof block.content === "string" && block.content.toLowerCase().includes(lower)) {
-          return "tool";
-        }
-        if (Array.isArray(block.content)) {
-          for (const sub of block.content) {
-            if (sub.type === "text" && sub.text && sub.text.toLowerCase().includes(lower)) {
-              return "tool";
-            }
-          }
-        }
-      }
+    if (block.type === "tool_result") {
+      if (typeof block.content === "string" && block.content.toLowerCase().includes(lower)) return "tool";
+      if (Array.isArray(block.content) && block.content.some((sub) => sub.text?.toLowerCase().includes(lower))) return "tool";
     }
   }
 
@@ -332,15 +373,8 @@ function isMetaOrCommand(text: string): boolean {
 }
 
 function parseClaudeSession(filePath: string): Session | null {
-  let data: string;
-  try {
-    data = readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-
-  const lines = data.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return null;
+  const records = readJsonlRecords(filePath);
+  if (records.length === 0) return null;
 
   let sessionId = "";
   let cwd = "";
@@ -348,14 +382,7 @@ function parseClaudeSession(filePath: string): Session | null {
   let endTime = "";
   let firstMessage = "";
 
-  for (const line of lines) {
-    let record: any;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
+  for (const record of records) {
     if (record.timestamp) {
       if (!startTime || record.timestamp < startTime) startTime = record.timestamp;
       if (!endTime || record.timestamp > endTime) endTime = record.timestamp;
@@ -400,34 +427,38 @@ function parseClaudeSession(filePath: string): Session | null {
 }
 
 function getClaudeSessions(): Session[] {
+  return getClaudeJsonlPaths()
+    .map(parseClaudeSession)
+    .filter((s): s is Session => s !== null);
+}
+
+function safeReaddir(dirPath: string): string[] {
+  try {
+    return readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function getClaudeJsonlPaths(): string[] {
   if (!existsSync(CLAUDE_DIR)) return [];
 
-  const sessions: Session[] = [];
-  const projectDirs = readdirSync(CLAUDE_DIR);
-
-  for (const dir of projectDirs) {
-    const dirPath = join(CLAUDE_DIR, dir);
-    try {
-      if (!statSync(dirPath).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-
-    let files: string[];
-    try {
-      files = readdirSync(dirPath);
-    } catch {
-      continue;
-    }
-
-    for (const file of files) {
-      if (!file.endsWith(".jsonl") || file.startsWith("agent-")) continue;
-      const session = parseClaudeSession(join(dirPath, file));
-      if (session) sessions.push(session);
-    }
-  }
-
-  return sessions;
+  return safeReaddir(CLAUDE_DIR)
+    .map((dir) => join(CLAUDE_DIR, dir))
+    .filter(isDirectory)
+    .flatMap((dirPath) =>
+      safeReaddir(dirPath)
+        .filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"))
+        .map((f) => join(dirPath, f))
+    );
 }
 
 // --- OpenCode session parsing ---
@@ -464,7 +495,7 @@ function getOpencodeSessions(): Session[] {
       FROM session s
       WHERE s.time_archived IS NULL
       ORDER BY s.time_updated DESC
-    `).all() as any[];
+    `).all() as OpencodeSessionRow[];
 
     return rows
       .filter((r) => r.first_message)
@@ -476,7 +507,7 @@ function getOpencodeSessions(): Session[] {
         startTime: new Date(r.time_created).toISOString(),
         endTime: new Date(r.time_updated).toISOString(),
         title: r.title || "",
-        firstMessage: (r.first_message as string).replace(/\n/g, " ").trim(),
+        firstMessage: r.first_message!.replace(/\n/g, " ").trim(),
         cwd: r.directory,
       }));
   } finally {
@@ -492,6 +523,20 @@ function getAllSessions(): Session[] {
   return [...claude, ...opencode];
 }
 
+function findSession(sessionId: string): Session {
+  const sessions = getAllSessions();
+  const session = sessions.find(
+    (s) => s.id === sessionId || s.id.startsWith(sessionId)
+  );
+
+  if (!session) {
+    console.error(`Session not found: ${sessionId}`);
+    process.exit(1);
+  }
+
+  return session;
+}
+
 function groupByProject(sessions: Session[]): ProjectGroup[] {
   const groups = new Map<string, Session[]>();
 
@@ -501,23 +546,20 @@ function groupByProject(sessions: Session[]): ProjectGroup[] {
     groups.set(s.projectDir, existing);
   }
 
-  const result: ProjectGroup[] = [];
-  for (const [projectDir, projectSessions] of groups) {
-    projectSessions.sort(
-      (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+  return Array.from(groups.entries())
+    .map(([projectDir, projectSessions]) => {
+      projectSessions.sort(
+        (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+      );
+      return {
+        projectDir,
+        sessions: projectSessions,
+        lastActive: projectSessions[0].startTime,
+      };
+    })
+    .sort(
+      (a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
     );
-    result.push({
-      projectDir,
-      sessions: projectSessions,
-      lastActive: projectSessions[0].startTime,
-    });
-  }
-
-  result.sort(
-    (a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime()
-  );
-
-  return result;
 }
 
 // --- Commands ---
@@ -546,7 +588,7 @@ function cmdList(filter?: string) {
       const date = formatDate(s.startTime);
       const id = shortId(s.id);
       const tag = sourceTag(s.source);
-      const label = s.title || truncate(s.firstMessage, 70);
+      const label = s.title || truncate(s.firstMessage, MAX_LIST_LABEL);
       console.log(`  ${date}  ${id}  ${tag} "${label}"`);
     }
   }
@@ -558,22 +600,46 @@ function cmdSearch(term: string) {
   const matches: { session: Session; matchLine: string; role: string }[] = [];
 
   // Search Claude sessions — all record types (user, assistant, tool)
-  for (const session of getClaudeSessions()) {
-    let data: string;
-    try {
-      data = readFileSync(session.filePath, "utf-8");
-    } catch {
-      continue;
-    }
-
-    const lines = data.split("\n").filter((l) => l.trim());
-    for (const line of lines) {
-      let record: any;
-      try {
-        record = JSON.parse(line);
-      } catch {
-        continue;
+  for (const filePath of getClaudeJsonlPaths()) {
+    const records = readJsonlRecords(filePath);
+    // Build minimal session info from the records (single pass)
+    let sessionId = "";
+    let cwd = "";
+    let startTime = "";
+    let firstMessage = "";
+    for (const record of records) {
+      if (record.type === "user" && record.sessionId && !sessionId) {
+        sessionId = record.sessionId;
       }
+      if (record.type === "user" && record.cwd && !cwd) {
+        cwd = record.cwd;
+      }
+      if (record.timestamp && (!startTime || record.timestamp < startTime)) {
+        startTime = record.timestamp;
+      }
+      if (record.type === "user" && !record.isMeta && record.message?.role === "user" && !firstMessage) {
+        const text = cleanMessageContent(record.message.content);
+        if (!isMetaOrCommand(text)) firstMessage = text;
+      }
+    }
+    if (!sessionId) continue;
+
+    const projectDirName = basename(join(filePath, ".."));
+    const projectDir = cwd ? tildify(cwd) : dirNameToPath(projectDirName);
+    const session: Session = {
+      id: sessionId,
+      source: "claude",
+      projectDir,
+      filePath,
+      startTime: startTime || "",
+      endTime: "",
+      title: "",
+      firstMessage: firstMessage.replace(/\n/g, " ").trim(),
+      cwd,
+    };
+
+    // Now search the already-parsed records
+    for (const record of records) {
       if (record.isMeta) continue;
 
       // Use matchRoleInRecord to find the match and determine the specific role
@@ -610,7 +676,7 @@ function cmdSearch(term: string) {
           AND json_extract(p.data, '$.text') LIKE $pattern
         GROUP BY s.id
         ORDER BY s.time_updated DESC
-      `).all({ $pattern: `%${term}%` }) as any[];
+      `).all({ $pattern: `%${term}%` }) as OpencodeSearchRow[];
 
       for (const r of rows) {
         const role = r.match_role === "user" ? "user" : "assistant";
@@ -623,10 +689,10 @@ function cmdSearch(term: string) {
             startTime: new Date(r.time_created).toISOString(),
             endTime: new Date(r.time_updated).toISOString(),
             title: r.title || "",
-            firstMessage: (r.match_text as string).replace(/\n/g, " ").trim(),
+            firstMessage: r.match_text.replace(/\n/g, " ").trim(),
             cwd: r.directory,
           },
-          matchLine: (r.match_text as string).replace(/\n/g, " ").trim(),
+          matchLine: r.match_text.replace(/\n/g, " ").trim(),
           role,
         });
       }
@@ -649,7 +715,7 @@ function cmdSearch(term: string) {
     const date = formatDate(session.startTime);
     const id = shortId(session.id);
     const tag = sourceTag(session.source);
-    const preview = truncate(matchLine, 100);
+    const preview = truncate(matchLine, MAX_SEARCH_PREVIEW);
     console.log(`  ${date}  ${id}  ${tag} ${session.projectDir}`);
     console.log(`    [${role}] "${preview}"`);
     console.log();
@@ -657,15 +723,7 @@ function cmdSearch(term: string) {
 }
 
 function cmdShow(sessionId: string, short: boolean) {
-  const sessions = getAllSessions();
-  const session = sessions.find(
-    (s) => s.id === sessionId || s.id.startsWith(sessionId)
-  );
-
-  if (!session) {
-    console.error(`Session not found: ${sessionId}`);
-    process.exit(1);
-  }
+  const session = findSession(sessionId);
 
   const out: string[] = [];
   out.push(`\nSession: ${session.id}`);
@@ -674,7 +732,7 @@ function cmdShow(sessionId: string, short: boolean) {
   out.push(`Started: ${formatDate(session.startTime)}`);
   if (session.title) out.push(`Title:   ${session.title}`);
   out.push(`CWD:     ${session.cwd}`);
-  out.push(`${"─".repeat(60)}\n`);
+  out.push(`${"─".repeat(HEADER_WIDTH)}\n`);
 
   if (session.source === "claude") {
     showClaudeSession(session, short, out);
@@ -687,69 +745,56 @@ function cmdShow(sessionId: string, short: boolean) {
 }
 
 function showClaudeSession(session: Session, short: boolean, out: string[]) {
-  let data: string;
-  try {
-    data = readFileSync(session.filePath, "utf-8");
-  } catch {
+  const records = readJsonlRecords(session.filePath);
+  if (records.length === 0) {
     console.error(`Could not read session file: ${session.filePath}`);
     process.exit(1);
   }
 
-  const lines = data.split("\n").filter((l) => l.trim());
-  for (const line of lines) {
-    let record: any;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  for (const record of records) {
+    if (!record.message || record.isMeta) continue;
+    const time = record.timestamp ? formatDate(record.timestamp) : "";
 
-    if (record.type === "user" && !record.isMeta && record.message?.role === "user") {
+    if (record.type === "user" && record.message.role === "user") {
       const text = cleanMessageContent(record.message.content);
       if (isMetaOrCommand(text)) continue;
-      const time = record.timestamp ? formatDate(record.timestamp) : "";
 
       if (short) {
         out.push(`[${time}] User:`);
-        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
-        out.push("");
+        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), MAX_SHORT_MESSAGE)}`);
       } else {
         out.push(formatMessageHeader("User", time));
         out.push(text.trim());
-        out.push("");
       }
+      out.push("");
+      continue;
     }
 
-    if (record.type === "assistant" && record.message?.role === "assistant") {
-      const time = record.timestamp ? formatDate(record.timestamp) : "";
-      const msgContent = record.message.content;
-
+    if (record.type === "assistant" && record.message.role === "assistant") {
       if (short) {
-        const text = cleanMessageContent(msgContent);
+        const text = cleanMessageContent(record.message.content);
         if (!text.trim()) continue;
         out.push(`[${time}] Assistant:`);
-        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), 200)}`);
+        out.push(`  ${truncate(text.replace(/\n/g, " ").trim(), MAX_SHORT_MESSAGE)}`);
         out.push("");
-      } else {
-        // Full mode: show text blocks and tool_use blocks
-        const parts: string[] = [];
-        if (typeof msgContent === "string") {
-          parts.push(msgContent);
-        } else if (Array.isArray(msgContent)) {
-          for (const block of msgContent) {
-            if (block.type === "text" && block.text) {
-              parts.push(block.text);
-            } else if (block.type === "tool_use") {
-              parts.push(formatToolUse(block));
-            }
-          }
-        }
-        const combined = parts.join("\n").trim();
-        if (!combined) continue;
-        out.push(formatMessageHeader("Assistant", time));
-        out.push(combined);
-        out.push("");
+        continue;
       }
+
+      const msgContent = record.message.content;
+      const parts: string[] = typeof msgContent === "string"
+        ? [msgContent]
+        : Array.isArray(msgContent)
+          ? msgContent.flatMap((block) => {
+              if (block.type === "text" && block.text) return [block.text];
+              if (block.type === "tool_use") return [formatToolUse(block)];
+              return [];
+            })
+          : [];
+      const combined = parts.join("\n").trim();
+      if (!combined) continue;
+      out.push(formatMessageHeader("Assistant", time));
+      out.push(combined);
+      out.push("");
     }
   }
 }
@@ -769,10 +814,10 @@ function showOpencodeSession(session: Session, short: boolean, out: string[]) {
       FROM message m
       WHERE m.session_id = $sessionId
       ORDER BY m.time_created ASC
-    `).all({ $sessionId: session.id }) as any[];
+    `).all({ $sessionId: session.id }) as OpencodeMessageRow[];
 
     for (const msg of messages) {
-      const msgData = JSON.parse(msg.data);
+      const msgData = JSON.parse(msg.data) as { role: string };
       const role = msgData.role === "user" ? "User" : "Assistant";
       const time = formatDate(new Date(msg.time_created).toISOString());
 
@@ -781,24 +826,22 @@ function showOpencodeSession(session: Session, short: boolean, out: string[]) {
         SELECT data FROM part
         WHERE message_id = $msgId
         ORDER BY time_created ASC
-      `).all({ $msgId: msg.id }) as any[];
+      `).all({ $msgId: msg.id }) as OpencodePartRow[];
 
-      const textParts = parts
-        .map((p: any) => {
-          try {
-            const pd = JSON.parse(p.data);
-            if (pd.type === "text") return pd.text;
-          } catch {}
-          return null;
-        })
-        .filter(Boolean);
+      const textParts = parts.flatMap((p) => {
+        try {
+          const pd = JSON.parse(p.data) as { type: string; text?: string };
+          if (pd.type === "text" && pd.text) return [pd.text];
+        } catch {}
+        return [];
+      });
 
       if (textParts.length === 0) continue;
 
       if (short) {
         const text = textParts.join("\n").replace(/\n/g, " ").trim();
         out.push(`[${time}] ${role}:`);
-        out.push(`  ${truncate(text, 200)}`);
+        out.push(`  ${truncate(text, MAX_SHORT_MESSAGE)}`);
         out.push("");
       } else {
         const text = textParts.join("\n").trim();
@@ -813,15 +856,7 @@ function showOpencodeSession(session: Session, short: boolean, out: string[]) {
 }
 
 function cmdResume(sessionId: string) {
-  const sessions = getAllSessions();
-  const session = sessions.find(
-    (s) => s.id === sessionId || s.id.startsWith(sessionId)
-  );
-
-  if (!session) {
-    console.error(`Session not found: ${sessionId}`);
-    process.exit(1);
-  }
+  const session = findSession(sessionId);
 
   const cwd = session.cwd || untildify(session.projectDir);
 
@@ -913,10 +948,12 @@ function cmdBackup(args: string[]) {
 
   // Build tar arguments — paths relative to HOME so restore is predictable
   const tarPaths = sources.map((s) => s.path.slice(HOME.length + 1)); // strip leading HOME/
-  const tarCmd = `tar -czf ${archivePath} -C ${HOME} ${tarPaths.join(" ")}`;
 
   try {
-    execSync(tarCmd, { stdio: "pipe" });
+    const result = spawnSync("tar", ["-czf", archivePath, "-C", HOME, ...tarPaths], { stdio: "pipe" });
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.toString() || "tar command failed");
+    }
   } catch (e: any) {
     console.error(`Error creating archive: ${e.message}`);
     process.exit(1);
@@ -925,8 +962,10 @@ function cmdBackup(args: string[]) {
   // Count files in archive
   let fileCount = 0;
   try {
-    const listing = execSync(`tar -tzf ${archivePath}`, { encoding: "utf-8" });
-    fileCount = listing.trim().split("\n").filter((l) => l && !l.endsWith("/")).length;
+    const result = spawnSync("tar", ["-tzf", archivePath], { encoding: "utf-8" });
+    if (result.status === 0 && result.stdout) {
+      fileCount = result.stdout.trim().split("\n").filter((l) => l && !l.endsWith("/")).length;
+    }
   } catch {
     // non-critical
   }
@@ -1004,7 +1043,11 @@ function cmdRestore(args: string[]) {
   // List what will be overwritten
   let listing: string;
   try {
-    listing = execSync(`tar -tzf ${archivePath}`, { encoding: "utf-8" });
+    const result = spawnSync("tar", ["-tzf", archivePath], { encoding: "utf-8" });
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.toString() || "tar command failed");
+    }
+    listing = result.stdout || "";
   } catch (e: any) {
     console.error(`Error reading archive: ${e.message}`);
     process.exit(1);
@@ -1038,7 +1081,10 @@ function cmdRestore(args: string[]) {
 
   // Perform restore
   try {
-    execSync(`tar -xzf ${archivePath} -C ${HOME}`, { stdio: "pipe" });
+    const result = spawnSync("tar", ["-xzf", archivePath, "-C", HOME], { stdio: "pipe" });
+    if (result.status !== 0) {
+      throw new Error(result.stderr?.toString() || "tar command failed");
+    }
   } catch (e: any) {
     console.error(`Error extracting archive: ${e.message}`);
     process.exit(1);
