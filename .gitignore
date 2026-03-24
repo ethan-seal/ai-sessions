@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+bun.lock
+
+# Nix build outputs
+result
+result-*
+
+# Beans conversations
+.beans/.conversations/
