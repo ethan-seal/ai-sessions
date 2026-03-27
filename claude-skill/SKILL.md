@@ -27,7 +27,7 @@ Use this skill when the user:
 Search across all message content (user, assistant, and tool interactions):
 
 ```bash
-ai-sessions search <term>
+ai-sessions search <term> [--cwd] [--days <n>]
 ```
 
 **Examples:**
@@ -38,11 +38,14 @@ ai-sessions search authentication
 # Find sessions with specific code
 ai-sessions search "import React"
 
-# Find sessions where a command was used
-ai-sessions search "git rebase"
+# Restrict to current directory
+ai-sessions search "git rebase" --cwd
 
-# Find sessions mentioning a file
-ai-sessions search "config.yaml"
+# Only sessions from the last 7 days
+ai-sessions search "config.yaml" --days 7
+
+# Combine filters
+ai-sessions search "docker" --cwd --days 14
 ```
 
 Search results show:
@@ -57,10 +60,23 @@ Search results show:
 # List all sessions
 ai-sessions list
 
-# Filter by project path
+# Filter by project path (substring match)
 ai-sessions list dotfiles
 ai-sessions list claude-sessions
 ai-sessions list ~/Programming
+
+# Only sessions for the current directory (exact match)
+ai-sessions list --cwd
+
+# Only sessions active in the last N days
+ai-sessions list --days 5
+
+# Limit entries shown per directory
+ai-sessions list --limit 3
+
+# Combine flags
+ai-sessions list --cwd --days 7
+ai-sessions list --days 14 --limit 5
 ```
 
 Output groups sessions by project and shows:
@@ -126,14 +142,27 @@ Automatically:
 
 1. **List sessions for current project:**
    ```bash
-   # Use current directory name or path segment
+   # Exact match on current directory
+   ai-sessions list --cwd
+
+   # Or use a name/path segment as a substring filter
    ai-sessions list $(basename $(pwd))
    ```
 
 2. **Or search for project-specific terms:**
    ```bash
-   ai-sessions search "dockerfile"  # if working on containers
+   ai-sessions search "dockerfile" --cwd  # in current directory only
    ```
+
+### "What have I been working on recently?"
+
+```bash
+# All sessions from the last 5 days
+ai-sessions list --days 5
+
+# Recent sessions in this directory, newest 3 per project
+ai-sessions list --cwd --days 7 --limit 3
+```
 
 ### "Find where we used a specific tool/command"
 

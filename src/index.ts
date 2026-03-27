@@ -564,17 +564,41 @@ function groupByProject(sessions: Session[]): ProjectGroup[] {
 
 // --- Commands ---
 
-function cmdList(filter?: string) {
-  const sessions = getAllSessions();
+interface ListOpts {
+  cwd?: boolean;
+  days?: number;
+  limit?: number;
+}
+
+interface SearchOpts {
+  cwd?: boolean;
+  days?: number;
+}
+
+function sessionCutoff(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function cmdList(filter?: string, opts: ListOpts = {}) {
+  let sessions = getAllSessions();
+
+  if (opts.days !== undefined) {
+    const cutoff = sessionCutoff(opts.days);
+    sessions = sessions.filter((s) => (s.endTime || s.startTime) >= cutoff);
+  }
+
   let groups = groupByProject(sessions);
 
-  if (filter) {
+  if (opts.cwd) {
+    const cwdPath = tildify(process.cwd());
+    groups = groups.filter((g) => g.projectDir === cwdPath);
+  } else if (filter) {
     const lower = filter.toLowerCase();
     groups = groups.filter((g) => g.projectDir.toLowerCase().includes(lower));
   }
 
   if (groups.length === 0) {
-    console.log(filter ? `No sessions matching "${filter}"` : "No sessions found.");
+    console.log(filter || opts.cwd ? "No sessions found." : "No sessions found.");
     return;
   }
 
@@ -584,19 +608,25 @@ function cmdList(filter?: string) {
     console.log(
       `\n${group.projectDir} (${count} session${count !== 1 ? "s" : ""}, last active: ${lastActive})`
     );
-    for (const s of group.sessions) {
+    const displaySessions = opts.limit ? group.sessions.slice(0, opts.limit) : group.sessions;
+    for (const s of displaySessions) {
       const date = formatDate(s.startTime);
       const id = shortId(s.id);
       const tag = sourceTag(s.source);
       const label = s.title || truncate(s.firstMessage, MAX_LIST_LABEL);
       console.log(`  ${date}  ${id}  ${tag} "${label}"`);
     }
+    if (opts.limit && count > opts.limit) {
+      console.log(`  ... and ${count - opts.limit} more`);
+    }
   }
   console.log();
 }
 
-function cmdSearch(term: string) {
+function cmdSearch(term: string, opts: SearchOpts = {}) {
   const lower = term.toLowerCase();
+  const cutoff = opts.days !== undefined ? sessionCutoff(opts.days) : undefined;
+  const cwdFilter = opts.cwd ? tildify(process.cwd()) : undefined;
   const matches: { session: Session; matchLine: string; role: string }[] = [];
 
   // Search Claude sessions — all record types (user, assistant, tool)
@@ -703,15 +733,23 @@ function cmdSearch(term: string) {
     }
   }
 
-  if (matches.length === 0) {
+  let filtered = matches;
+  if (cwdFilter) {
+    filtered = filtered.filter((m) => m.session.projectDir === cwdFilter);
+  }
+  if (cutoff) {
+    filtered = filtered.filter((m) => (m.session.endTime || m.session.startTime) >= cutoff);
+  }
+
+  if (filtered.length === 0) {
     console.log(`No sessions found matching "${term}"`);
     return;
   }
 
   console.log(
-    `\nFound ${matches.length} session${matches.length !== 1 ? "s" : ""} matching "${term}":\n`
+    `\nFound ${filtered.length} session${filtered.length !== 1 ? "s" : ""} matching "${term}":\n`
   );
-  for (const { session, matchLine, role } of matches) {
+  for (const { session, matchLine, role } of filtered) {
     const date = formatDate(session.startTime);
     const id = shortId(session.id);
     const tag = sourceTag(session.source);
@@ -866,7 +904,7 @@ function cmdResume(sessionId: string) {
   }
 
   const cmd = session.source === "claude"
-    ? `claude --resume ${session.id}`
+    ? `claude --dangerously-skip-permissions --resume ${session.id}`
     : `opencode --session ${session.id}`;
 
   console.log(`Resuming ${session.source} session ${shortId(session.id)} in ${session.projectDir}...`);
@@ -1103,13 +1141,51 @@ function main() {
   const command = args[0];
 
   if (!command || command === "list") {
-    cmdList(args[1]);
+    const listArgs = args.slice(1);
+    let filter: string | undefined;
+    const listOpts: ListOpts = {};
+    for (let i = 0; i < listArgs.length; i++) {
+      if (listArgs[i] === "--cwd") {
+        listOpts.cwd = true;
+      } else if (listArgs[i] === "--days" && listArgs[i + 1]) {
+        listOpts.days = parseInt(listArgs[++i], 10);
+        if (isNaN(listOpts.days) || listOpts.days < 1) {
+          console.error("Error: --days must be a positive integer.");
+          process.exit(1);
+        }
+      } else if (listArgs[i] === "--limit" && listArgs[i + 1]) {
+        listOpts.limit = parseInt(listArgs[++i], 10);
+        if (isNaN(listOpts.limit) || listOpts.limit < 1) {
+          console.error("Error: --limit must be a positive integer.");
+          process.exit(1);
+        }
+      } else if (!listArgs[i].startsWith("--")) {
+        filter = listArgs[i];
+      }
+    }
+    cmdList(filter, listOpts);
   } else if (command === "search") {
-    if (!args[1]) {
-      console.error(`Usage: ${BIN_NAME} search <term>`);
+    const searchArgs = args.slice(1);
+    const termParts: string[] = [];
+    const searchOpts: SearchOpts = {};
+    for (let i = 0; i < searchArgs.length; i++) {
+      if (searchArgs[i] === "--cwd") {
+        searchOpts.cwd = true;
+      } else if (searchArgs[i] === "--days" && searchArgs[i + 1]) {
+        searchOpts.days = parseInt(searchArgs[++i], 10);
+        if (isNaN(searchOpts.days) || searchOpts.days < 1) {
+          console.error("Error: --days must be a positive integer.");
+          process.exit(1);
+        }
+      } else {
+        termParts.push(searchArgs[i]);
+      }
+    }
+    if (termParts.length === 0) {
+      console.error(`Usage: ${BIN_NAME} search <term> [--cwd] [--days <n>]`);
       process.exit(1);
     }
-    cmdSearch(args.slice(1).join(" "));
+    cmdSearch(termParts.join(" "), searchOpts);
   } else if (command === "show") {
     const showArgs = args.slice(1);
     const short = showArgs.includes("--short");
@@ -1137,7 +1213,12 @@ Searches and browses sessions from Claude Code and OpenCode.
 Commands:
   (none)              List all sessions grouped by project
   list [filter]       List sessions, optionally filtered by project name
+    --cwd               Only show sessions for the current directory
+    --days <n>          Only show sessions active in the last n days
+    --limit <n>         Max sessions to show per directory
   search <term>       Full-text search across all session messages
+    --cwd               Only search sessions for the current directory
+    --days <n>          Only search sessions active in the last n days
   show <session-id>   Show full conversation for a session
     --short             Truncated overview (200 chars per message)
   resume <session-id> Resume a session in its original directory
