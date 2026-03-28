@@ -611,7 +611,7 @@ function cmdList(filter?: string, opts: ListOpts = {}) {
     const displaySessions = opts.limit ? group.sessions.slice(0, opts.limit) : group.sessions;
     for (const s of displaySessions) {
       const date = formatDate(s.startTime);
-      const id = shortId(s.id);
+      const id = s.id;
       const tag = sourceTag(s.source);
       const label = s.title || truncate(s.firstMessage, MAX_LIST_LABEL);
       console.log(`  ${date}  ${id}  ${tag} "${label}"`);
@@ -751,7 +751,7 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
   );
   for (const { session, matchLine, role } of filtered) {
     const date = formatDate(session.startTime);
-    const id = shortId(session.id);
+    const id = session.id;
     const tag = sourceTag(session.source);
     const preview = truncate(matchLine, MAX_SEARCH_PREVIEW);
     console.log(`  ${date}  ${id}  ${tag} ${session.projectDir}`);
