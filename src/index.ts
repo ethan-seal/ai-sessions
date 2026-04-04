@@ -174,12 +174,50 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max - 3) + "...";
 }
 
-function snippetAround(text: string, term: string, maxLen: number): string {
-  const idx = text.toLowerCase().indexOf(term.toLowerCase());
+interface ParsedTerm {
+  raw: string;
+  text: string;
+  lower: string;
+  wordStart: boolean;
+  wordEnd: boolean;
+}
+
+function parseTerm(term: string): ParsedTerm {
+  let t = term;
+  const wordStart = t.startsWith("\\b");
+  const wordEnd = t.endsWith("\\b");
+  if (wordStart) t = t.slice(2);
+  if (wordEnd) t = t.slice(0, -2);
+  return { raw: term, text: t, lower: t.toLowerCase(), wordStart, wordEnd };
+}
+
+const WORD_CHAR = /\w/;
+
+function matchesTerm(haystack: string, pt: ParsedTerm): boolean {
+  const h = haystack.toLowerCase();
+  let start = 0;
+  while (true) {
+    const idx = h.indexOf(pt.lower, start);
+    if (idx === -1) return false;
+    if (pt.wordStart && idx > 0 && WORD_CHAR.test(h[idx - 1])) {
+      start = idx + 1;
+      continue;
+    }
+    const after = idx + pt.lower.length;
+    if (pt.wordEnd && after < h.length && WORD_CHAR.test(h[after])) {
+      start = idx + 1;
+      continue;
+    }
+    return true;
+  }
+}
+
+function snippetAround(text: string, pt: ParsedTerm, maxLen: number): string {
+  const idx = text.toLowerCase().indexOf(pt.lower);
   if (idx === -1) return truncate(text, maxLen);
-  const contextLen = Math.floor((maxLen - term.length) / 2);
+  const contextLen = Math.floor((maxLen - pt.text.length) / 2);
   let start = idx - contextLen;
-  let end = idx + term.length + contextLen;
+  let end = idx + pt.text.length + contextLen;
   let prefix = "";
   let suffix = "";
   if (start <= 0) {
@@ -349,7 +387,7 @@ function extractSearchableText(record: JsonlRecord): { text: string; role: strin
  * Returns "tool" if the match is found in tool_use/tool_result blocks,
  * otherwise returns the message role.
  */
-function matchRoleInRecord(record: JsonlRecord, lower: string): string | null {
+function matchRoleInRecord(record: JsonlRecord, pt: ParsedTerm): string | null {
   if (record.isMeta) return null;
 
   const msgContent = record.message?.content;
@@ -359,27 +397,27 @@ function matchRoleInRecord(record: JsonlRecord, lower: string): string | null {
   if (!baseRole) return null;
 
   if (typeof msgContent === "string") {
-    return msgContent.toLowerCase().includes(lower) ? baseRole : null;
+    return matchesTerm(msgContent, pt) ? baseRole : null;
   }
 
   if (!Array.isArray(msgContent)) return null;
 
   // Text blocks get priority — check them first
-  if (msgContent.some((b) => b.type === "text" && b.text && b.text.toLowerCase().includes(lower))) {
+  if (msgContent.some((b) => b.type === "text" && b.text && matchesTerm(b.text, pt))) {
     return baseRole;
   }
 
   // Then check tool content
   for (const block of msgContent) {
     if (block.type === "tool_use") {
-      if (block.name?.toLowerCase().includes(lower)) return "tool";
+      if (block.name && matchesTerm(block.name, pt)) return "tool";
       try {
-        if (JSON.stringify(block.input).toLowerCase().includes(lower)) return "tool";
+        if (matchesTerm(JSON.stringify(block.input), pt)) return "tool";
       } catch {}
     }
     if (block.type === "tool_result") {
-      if (typeof block.content === "string" && block.content.toLowerCase().includes(lower)) return "tool";
-      if (Array.isArray(block.content) && block.content.some((sub) => sub.text?.toLowerCase().includes(lower))) return "tool";
+      if (typeof block.content === "string" && matchesTerm(block.content, pt)) return "tool";
+      if (Array.isArray(block.content) && block.content.some((sub) => sub.text && matchesTerm(sub.text, pt))) return "tool";
     }
   }
 
@@ -647,7 +685,7 @@ function cmdList(filter?: string, opts: ListOpts = {}) {
 }
 
 function cmdSearch(term: string, opts: SearchOpts = {}) {
-  const lower = term.toLowerCase();
+  const pt = parseTerm(term);
   const cutoff = opts.days !== undefined ? sessionCutoff(opts.days) : undefined;
   const cwdFilter = opts.cwd ? tildify(process.cwd()) : undefined;
   const matches: { session: Session; matchLine: string; role: string }[] = [];
@@ -696,7 +734,7 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
       if (record.isMeta) continue;
 
       // Use matchRoleInRecord to find the match and determine the specific role
-      const role = matchRoleInRecord(record, lower);
+      const role = matchRoleInRecord(record, pt);
       if (role) {
         // Extract readable text for display context
         const extracted = extractSearchableText(record);
@@ -729,9 +767,10 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
           AND json_extract(p.data, '$.text') LIKE $pattern
         GROUP BY s.id
         ORDER BY s.time_updated DESC
-      `).all({ $pattern: `%${term}%` }) as OpencodeSearchRow[];
+      `).all({ $pattern: `%${pt.text}%` }) as OpencodeSearchRow[];
 
       for (const r of rows) {
+        if ((pt.wordStart || pt.wordEnd) && !matchesTerm(r.match_text, pt)) continue;
         const role = r.match_role === "user" ? "user" : "assistant";
         matches.push({
           session: {
@@ -776,7 +815,7 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
     const date = formatDate(session.startTime);
     const id = session.id;
     const tag = sourceTag(session.source);
-    const preview = snippetAround(matchLine, term, MAX_SEARCH_PREVIEW);
+    const preview = snippetAround(matchLine, pt, MAX_SEARCH_PREVIEW);
     console.log(`  ${date}  ${id}  ${tag} ${session.projectDir}`);
     console.log(`    [${role}] "${preview}"`);
     console.log();

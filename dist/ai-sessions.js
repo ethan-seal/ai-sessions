@@ -71,13 +71,43 @@ function truncate(s, max) {
     return s;
   return s.slice(0, max - 3) + "...";
 }
-function snippetAround(text, term, maxLen) {
-  const idx = text.toLowerCase().indexOf(term.toLowerCase());
+function parseTerm(term) {
+  let t = term;
+  const wordStart = t.startsWith("\\b");
+  const wordEnd = t.endsWith("\\b");
+  if (wordStart)
+    t = t.slice(2);
+  if (wordEnd)
+    t = t.slice(0, -2);
+  return { raw: term, text: t, lower: t.toLowerCase(), wordStart, wordEnd };
+}
+var WORD_CHAR = /\w/;
+function matchesTerm(haystack, pt) {
+  const h = haystack.toLowerCase();
+  let start = 0;
+  while (true) {
+    const idx = h.indexOf(pt.lower, start);
+    if (idx === -1)
+      return false;
+    if (pt.wordStart && idx > 0 && WORD_CHAR.test(h[idx - 1])) {
+      start = idx + 1;
+      continue;
+    }
+    const after = idx + pt.lower.length;
+    if (pt.wordEnd && after < h.length && WORD_CHAR.test(h[after])) {
+      start = idx + 1;
+      continue;
+    }
+    return true;
+  }
+}
+function snippetAround(text, pt, maxLen) {
+  const idx = text.toLowerCase().indexOf(pt.lower);
   if (idx === -1)
     return truncate(text, maxLen);
-  const contextLen = Math.floor((maxLen - term.length) / 2);
+  const contextLen = Math.floor((maxLen - pt.text.length) / 2);
   let start = idx - contextLen;
-  let end = idx + term.length + contextLen;
+  let end = idx + pt.text.length + contextLen;
   let prefix = "";
   let suffix = "";
   if (start <= 0) {
@@ -209,7 +239,7 @@ function extractSearchableText(record) {
     return null;
   return { text, role };
 }
-function matchRoleInRecord(record, lower) {
+function matchRoleInRecord(record, pt) {
   if (record.isMeta)
     return null;
   const msgContent = record.message?.content;
@@ -219,26 +249,26 @@ function matchRoleInRecord(record, lower) {
   if (!baseRole)
     return null;
   if (typeof msgContent === "string") {
-    return msgContent.toLowerCase().includes(lower) ? baseRole : null;
+    return matchesTerm(msgContent, pt) ? baseRole : null;
   }
   if (!Array.isArray(msgContent))
     return null;
-  if (msgContent.some((b) => b.type === "text" && b.text && b.text.toLowerCase().includes(lower))) {
+  if (msgContent.some((b) => b.type === "text" && b.text && matchesTerm(b.text, pt))) {
     return baseRole;
   }
   for (const block of msgContent) {
     if (block.type === "tool_use") {
-      if (block.name?.toLowerCase().includes(lower))
+      if (block.name && matchesTerm(block.name, pt))
         return "tool";
       try {
-        if (JSON.stringify(block.input).toLowerCase().includes(lower))
+        if (matchesTerm(JSON.stringify(block.input), pt))
           return "tool";
       } catch {}
     }
     if (block.type === "tool_result") {
-      if (typeof block.content === "string" && block.content.toLowerCase().includes(lower))
+      if (typeof block.content === "string" && matchesTerm(block.content, pt))
         return "tool";
-      if (Array.isArray(block.content) && block.content.some((sub) => sub.text?.toLowerCase().includes(lower)))
+      if (Array.isArray(block.content) && block.content.some((sub) => sub.text && matchesTerm(sub.text, pt)))
         return "tool";
     }
   }
@@ -431,7 +461,7 @@ ${group.projectDir} (${count} session${count !== 1 ? "s" : ""}, last active: ${l
   console.log();
 }
 function cmdSearch(term, opts = {}) {
-  const lower = term.toLowerCase();
+  const pt = parseTerm(term);
   const cutoff = opts.days !== undefined ? sessionCutoff(opts.days) : undefined;
   const cwdFilter = opts.cwd ? tildify(process.cwd()) : undefined;
   const matches = [];
@@ -475,7 +505,7 @@ function cmdSearch(term, opts = {}) {
     for (const record of records) {
       if (record.isMeta)
         continue;
-      const role = matchRoleInRecord(record, lower);
+      const role = matchRoleInRecord(record, pt);
       if (role) {
         const extracted = extractSearchableText(record);
         const displayText = extracted ? extracted.text.replace(/\n/g, " ").trim() : "";
@@ -505,8 +535,10 @@ function cmdSearch(term, opts = {}) {
           AND json_extract(p.data, '$.text') LIKE $pattern
         GROUP BY s.id
         ORDER BY s.time_updated DESC
-      `).all({ $pattern: `%${term}%` });
+      `).all({ $pattern: `%${pt.text}%` });
       for (const r of rows) {
+        if ((pt.wordStart || pt.wordEnd) && !matchesTerm(r.match_text, pt))
+          continue;
         const role = r.match_role === "user" ? "user" : "assistant";
         matches.push({
           session: {
@@ -546,7 +578,7 @@ Found ${filtered.length} session${filtered.length !== 1 ? "s" : ""} matching "${
     const date = formatDate(session.startTime);
     const id = session.id;
     const tag = sourceTag(session.source);
-    const preview = snippetAround(matchLine, term, MAX_SEARCH_PREVIEW);
+    const preview = snippetAround(matchLine, pt, MAX_SEARCH_PREVIEW);
     console.log(`  ${date}  ${id}  ${tag} ${session.projectDir}`);
     console.log(`    [${role}] "${preview}"`);
     console.log();
