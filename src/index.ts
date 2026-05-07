@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import { execSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import { Database } from "bun:sqlite";
 
 // --- Types ---
@@ -427,6 +427,9 @@ function matchRoleInRecord(record: JsonlRecord, pt: ParsedTerm): string | null {
 function isMetaOrCommand(text: string): boolean {
   return (
     text.startsWith("<command-name>") ||
+    text.startsWith("<command-message>") ||
+    text.startsWith("<environment_context>") ||
+    text.startsWith("<turn_aborted>") ||
     text.startsWith("<local-command-stdout>") ||
     text.startsWith("Caveat: The messages below") ||
     text.trim() === ""
@@ -610,12 +613,14 @@ function groupByProject(sessions: Session[]): ProjectGroup[] {
   return Array.from(groups.entries())
     .map(([projectDir, projectSessions]) => {
       projectSessions.sort(
-        (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()
+        (a, b) =>
+          new Date(b.endTime || b.startTime).getTime() -
+          new Date(a.endTime || a.startTime).getTime()
       );
       return {
         projectDir,
         sessions: projectSessions,
-        lastActive: projectSessions[0].startTime,
+        lastActive: projectSessions[0].endTime || projectSessions[0].startTime,
       };
     })
     .sort(
@@ -697,6 +702,7 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
     let sessionId = "";
     let cwd = "";
     let startTime = "";
+    let endTime = "";
     let firstMessage = "";
     for (const record of records) {
       if (record.type === "user" && record.sessionId && !sessionId) {
@@ -707,6 +713,9 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
       }
       if (record.timestamp && (!startTime || record.timestamp < startTime)) {
         startTime = record.timestamp;
+      }
+      if (record.timestamp && (!endTime || record.timestamp > endTime)) {
+        endTime = record.timestamp;
       }
       if (record.type === "user" && !record.isMeta && record.message?.role === "user" && !firstMessage) {
         const text = cleanMessageContent(record.message.content);
@@ -723,7 +732,7 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
       projectDir,
       filePath,
       startTime: startTime || "",
-      endTime: "",
+      endTime: endTime || "",
       title: "",
       firstMessage: firstMessage.replace(/\n/g, " ").trim(),
       cwd,
@@ -965,13 +974,14 @@ function cmdResume(sessionId: string) {
     process.exit(1);
   }
 
-  const cmd = session.source === "claude"
-    ? `claude --dangerously-skip-permissions --resume ${session.id}`
-    : `opencode --session ${session.id}`;
+  const command = session.source === "claude" ? "claude" : "opencode";
+  const commandArgs = session.source === "claude"
+    ? ["--dangerously-skip-permissions", "--resume", session.id]
+    : ["--session", session.id];
 
   console.log(`Resuming ${session.source} session ${shortId(session.id)} in ${session.projectDir}...`);
   try {
-    execSync(cmd, { cwd, stdio: "inherit" });
+    spawnSync(command, commandArgs, { cwd, stdio: "inherit" });
   } catch {
     // tool exiting is normal
   }
