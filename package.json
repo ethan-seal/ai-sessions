@@ -6,7 +6,9 @@
     "ai-sessions": "./src/index.ts"
   },
   "scripts": {
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "build": "bun build src/index.ts --outfile dist/ai-sessions.js"
   },
   "devDependencies": {
     "bun-types": "^1.3.11"

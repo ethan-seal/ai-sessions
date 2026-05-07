@@ -286,10 +286,10 @@ The tool uses these default paths:
 bun src/index.ts list
 
 # Type check
-bun run tsc --noEmit
+bun run typecheck
 
 # Build distribution
-bun build src/index.ts --outdir dist
+bun run build
 ```
 
 ## License
