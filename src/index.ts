@@ -246,7 +246,7 @@ interface ParsedTerm {
   wordEnd: boolean;
 }
 
-function parseTerm(term: string): ParsedTerm {
+export function parseTerm(term: string): ParsedTerm {
   let t = term;
   const wordStart = t.startsWith("\\b");
   const wordEnd = t.endsWith("\\b");
@@ -257,12 +257,12 @@ function parseTerm(term: string): ParsedTerm {
 
 const WORD_CHAR = /\w/;
 
-function matchesTerm(haystack: string, pt: ParsedTerm): boolean {
+export function findTermIndex(haystack: string, pt: ParsedTerm): number {
   const h = haystack.toLowerCase();
   let start = 0;
   while (true) {
     const idx = h.indexOf(pt.lower, start);
-    if (idx === -1) return false;
+    if (idx === -1) return -1;
     if (pt.wordStart && idx > 0 && WORD_CHAR.test(h[idx - 1])) {
       start = idx + 1;
       continue;
@@ -272,12 +272,16 @@ function matchesTerm(haystack: string, pt: ParsedTerm): boolean {
       start = idx + 1;
       continue;
     }
-    return true;
+    return idx;
   }
 }
 
-function snippetAround(text: string, pt: ParsedTerm, maxLen: number): string {
-  const idx = text.toLowerCase().indexOf(pt.lower);
+export function matchesTerm(haystack: string, pt: ParsedTerm): boolean {
+  return findTermIndex(haystack, pt) !== -1;
+}
+
+export function snippetAround(text: string, pt: ParsedTerm, maxLen: number): string {
+  const idx = findTermIndex(text, pt);
   if (idx === -1) return truncate(text, maxLen);
   const contextLen = Math.floor((maxLen - pt.text.length) / 2);
   let start = idx - contextLen;
@@ -1649,4 +1653,6 @@ Sources:
   }
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

@@ -115,13 +115,13 @@ function parseTerm(term) {
   return { raw: term, text: t, lower: t.toLowerCase(), wordStart, wordEnd };
 }
 var WORD_CHAR = /\w/;
-function matchesTerm(haystack, pt) {
+function findTermIndex(haystack, pt) {
   const h = haystack.toLowerCase();
   let start = 0;
   while (true) {
     const idx = h.indexOf(pt.lower, start);
     if (idx === -1)
-      return false;
+      return -1;
     if (pt.wordStart && idx > 0 && WORD_CHAR.test(h[idx - 1])) {
       start = idx + 1;
       continue;
@@ -131,11 +131,14 @@ function matchesTerm(haystack, pt) {
       start = idx + 1;
       continue;
     }
-    return true;
+    return idx;
   }
 }
+function matchesTerm(haystack, pt) {
+  return findTermIndex(haystack, pt) !== -1;
+}
 function snippetAround(text, pt, maxLen) {
-  const idx = text.toLowerCase().indexOf(pt.lower);
+  const idx = findTermIndex(text, pt);
   if (idx === -1)
     return truncate(text, maxLen);
   const contextLen = Math.floor((maxLen - pt.text.length) / 2);
@@ -1286,4 +1289,12 @@ Sources:
     process.exit(1);
   }
 }
-main();
+if (import.meta.main) {
+  main();
+}
+export {
+  snippetAround,
+  parseTerm,
+  matchesTerm,
+  findTermIndex
+};
