@@ -183,7 +183,7 @@ ai-sessions search "Edit tool"
 
 Search performs case-insensitive matching across:
 - **User messages** - What you asked
-- **Assistant responses** - What Claude/OpenCode wrote
+- **Assistant responses** - What Claude/OpenCode/Codex wrote
 - **Tool use inputs** - File paths, commands, code in tool parameters
 - **Tool results** - Output from tools
 
@@ -232,10 +232,11 @@ You: I found 3 sessions about authentication:
 
 - **Claude Code**: `~/.claude/projects/` (JSONL files)
 - **OpenCode**: `~/.local/share/opencode/opencode.db` (SQLite)
+- **Codex**: `~/.codex/sessions/` and `~/.codex/state_5.sqlite` (rollout JSONL files and thread index)
 
 ## Limitations
 
 - Only searches non-archived sessions
 - Requires `ai-sessions` to be installed and in PATH
-- Session must have been created by Claude Code or OpenCode
+- Session must have been created by Claude Code, OpenCode, or Codex
 - Cannot search sessions that have been manually deleted
