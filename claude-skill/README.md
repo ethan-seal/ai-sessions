@@ -1,6 +1,6 @@
 # AI Sessions - Claude Code Skill
 
-This skill enables Claude Code to search and reference your past AI coding sessions.
+This skill enables Claude Code to search and reference your past AI coding sessions across Claude Code, OpenCode, and Codex.
 
 ## Installation
 
@@ -84,9 +84,10 @@ Claude: [Runs: ai-sessions search "git rebase"]
 ## Requirements
 
 - `ai-sessions` must be installed and available in PATH
-- Claude Code or OpenCode sessions must exist in:
+- Claude Code, OpenCode, or Codex sessions must exist in:
   - `~/.claude/projects/` (Claude Code)
   - `~/.local/share/opencode/opencode.db` (OpenCode)
+  - `~/.codex/sessions/` and `~/.codex/state_5.sqlite` (Codex)
 
 ## Skill Files
 

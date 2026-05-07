@@ -8,16 +8,16 @@ import { Database } from "bun:sqlite";
 
 // --- Types ---
 
-type Source = "claude" | "opencode";
+type Source = "claude" | "opencode" | "codex";
 
 interface Session {
   id: string;
   source: Source;
   projectDir: string;
-  filePath: string; // JSONL path (claude) or "" (opencode)
+  filePath: string; // JSONL path (claude/codex) or "" (opencode)
   startTime: string; // ISO string
   endTime: string;
-  title: string; // opencode title or "" for claude
+  title: string; // opencode/codex title or "" for claude
   firstMessage: string;
   cwd: string;
 }
@@ -87,11 +87,39 @@ interface OpencodePartRow {
   data: string;
 }
 
+interface CodexThreadRow {
+  id: string;
+  rollout_path: string;
+  created_at_ms: number | null;
+  updated_at_ms: number | null;
+  created_at: number;
+  updated_at: number;
+  cwd: string;
+  title: string | null;
+  first_user_message: string | null;
+}
+
+interface CodexRecord {
+  timestamp?: string;
+  type: string;
+  payload?: Record<string, unknown>;
+}
+
+interface CodexTranscriptEntry {
+  role: "user" | "assistant" | "tool";
+  text: string;
+  time: string;
+}
+
 // --- Helpers ---
 
 const HOME = homedir();
 const CLAUDE_DIR = join(HOME, ".claude", "projects");
 const OPENCODE_DB = join(HOME, ".local", "share", "opencode", "opencode.db");
+const CODEX_HOME = process.env.CODEX_HOME ? untildify(process.env.CODEX_HOME) : join(HOME, ".codex");
+const CODEX_SESSIONS_DIR = join(CODEX_HOME, "sessions");
+const CODEX_STATE_DB = join(CODEX_HOME, "state_5.sqlite");
+const CODEX_HISTORY_FILE = join(CODEX_HOME, "history.jsonl");
 const DEFAULT_BACKUP_DIR = join(HOME, ".ai-sessions-backups");
 
 const MAX_TOOL_INPUT_DISPLAY = 200;
@@ -120,6 +148,42 @@ function readJsonlRecords(filePath: string): JsonlRecord[] {
   }
 
   return records;
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readCodexRecords(filePath: string): CodexRecord[] {
+  let data: string;
+  try {
+    data = readFileSync(filePath, "utf-8");
+  } catch {
+    return [];
+  }
+
+  return data
+    .split("\n")
+    .filter((l) => l.trim())
+    .flatMap((line) => {
+      try {
+        const raw = asObject(JSON.parse(line));
+        if (!raw || typeof raw.type !== "string") return [];
+        return [{
+          type: raw.type,
+          timestamp: stringValue(raw.timestamp) || undefined,
+          payload: asObject(raw.payload) || undefined,
+        }];
+      } catch {
+        return [];
+      }
+    });
 }
 
 function tildify(path: string): string {
@@ -258,7 +322,9 @@ function formatDateShort(iso: string): string {
 }
 
 function sourceTag(source: Source): string {
-  return source === "claude" ? "[claude]" : "[opencode]";
+  if (source === "claude") return "[claude]";
+  if (source === "opencode") return "[opencode]";
+  return "[codex]";
 }
 
 function outputViaPager(content: string): void {
@@ -579,12 +645,212 @@ function getOpencodeSessions(): Session[] {
   }
 }
 
+// --- Codex session parsing ---
+
+function codexContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .flatMap((item) => {
+      const obj = asObject(item);
+      const text = obj ? stringValue(obj.text) : "";
+      return text ? [text] : [];
+    })
+    .join("\n");
+}
+
+function codexResponseItemEntry(record: CodexRecord): CodexTranscriptEntry | null {
+  const payload = record.payload;
+  if (!payload || record.type !== "response_item") return null;
+
+  const payloadType = stringValue(payload.type);
+  if (payloadType === "message") {
+    const role = stringValue(payload.role);
+    if (role !== "user" && role !== "assistant") return null;
+    const text = codexContentText(payload.content).trim();
+    if (!text) return null;
+    if (role === "user" && isMetaOrCommand(text)) return null;
+    return { role, text, time: record.timestamp || "" };
+  }
+
+  if (payloadType === "function_call") {
+    const name = stringValue(payload.name) || "unknown_tool";
+    const args = stringValue(payload.arguments);
+    const text = args ? `[tool_call: ${name}]\n${args}` : `[tool_call: ${name}]`;
+    return { role: "tool", text, time: record.timestamp || "" };
+  }
+
+  if (payloadType === "function_call_output") {
+    const output = stringValue(payload.output).trim();
+    if (!output) return null;
+    return { role: "tool", text: `[tool_result]\n${output}`, time: record.timestamp || "" };
+  }
+
+  return null;
+}
+
+function codexEventMessageEntry(record: CodexRecord): CodexTranscriptEntry | null {
+  const payload = record.payload;
+  if (!payload || record.type !== "event_msg") return null;
+
+  const payloadType = stringValue(payload.type);
+  if (payloadType === "user_message") {
+    const text = stringValue(payload.message).trim();
+    return text ? { role: "user", text, time: record.timestamp || "" } : null;
+  }
+  if (payloadType === "agent_message") {
+    const text = stringValue(payload.message).trim();
+    return text ? { role: "assistant", text, time: record.timestamp || "" } : null;
+  }
+
+  return null;
+}
+
+function codexSearchEntry(record: CodexRecord): CodexTranscriptEntry | null {
+  return codexResponseItemEntry(record) || codexEventMessageEntry(record);
+}
+
+function codexDisplayEntries(records: CodexRecord[]): CodexTranscriptEntry[] {
+  const responseEntries = records
+    .map(codexResponseItemEntry)
+    .filter((entry): entry is CodexTranscriptEntry => entry !== null);
+
+  if (responseEntries.some((entry) => entry.role !== "tool")) {
+    return responseEntries;
+  }
+
+  return records
+    .map(codexEventMessageEntry)
+    .filter((entry): entry is CodexTranscriptEntry => entry !== null);
+}
+
+function codexFirstUserMessage(records: CodexRecord[]): string {
+  for (const record of records) {
+    const entry = codexSearchEntry(record);
+    if (entry?.role === "user" && !isMetaOrCommand(entry.text)) {
+      return entry.text.replace(/\n/g, " ").trim();
+    }
+  }
+  return "";
+}
+
+function parseCodexSession(filePath: string): Session | null {
+  const records = readCodexRecords(filePath);
+  if (records.length === 0) return null;
+
+  let sessionId = "";
+  let cwd = "";
+  let startTime = "";
+  let endTime = "";
+
+  for (const record of records) {
+    if (record.timestamp) {
+      if (!startTime || record.timestamp < startTime) startTime = record.timestamp;
+      if (!endTime || record.timestamp > endTime) endTime = record.timestamp;
+    }
+
+    if (record.type === "session_meta" && record.payload) {
+      if (!sessionId) sessionId = stringValue(record.payload.id);
+      if (!cwd) cwd = stringValue(record.payload.cwd);
+      const created = stringValue(record.payload.timestamp);
+      if (created && (!startTime || created < startTime)) startTime = created;
+    }
+  }
+
+  const firstMessage = codexFirstUserMessage(records);
+  if (!sessionId || !firstMessage) return null;
+
+  return {
+    id: sessionId,
+    source: "codex",
+    projectDir: cwd ? tildify(cwd) : tildify(join(filePath, "..")),
+    filePath,
+    startTime,
+    endTime,
+    title: "",
+    firstMessage,
+    cwd,
+  };
+}
+
+function codexIsoFromTime(ms: number | null, seconds: number): string {
+  const millis = ms ?? seconds * 1000;
+  return millis ? new Date(millis).toISOString() : "";
+}
+
+function getCodexSessionsFromDb(): Session[] {
+  if (!existsSync(CODEX_STATE_DB)) return [];
+
+  let db: Database;
+  try {
+    db = new Database(CODEX_STATE_DB, { readonly: true });
+  } catch {
+    return [];
+  }
+
+  try {
+    const rows = db.query(`
+      SELECT
+        id,
+        rollout_path,
+        created_at_ms,
+        updated_at_ms,
+        created_at,
+        updated_at,
+        cwd,
+        title,
+        first_user_message
+      FROM threads
+      WHERE archived = 0
+      ORDER BY updated_at_ms DESC, updated_at DESC
+    `).all() as CodexThreadRow[];
+
+    return rows.map((r) => ({
+      id: r.id,
+      source: "codex" as Source,
+      projectDir: tildify(r.cwd),
+      filePath: r.rollout_path,
+      startTime: codexIsoFromTime(r.created_at_ms, r.created_at),
+      endTime: codexIsoFromTime(r.updated_at_ms, r.updated_at),
+      title: r.title || "",
+      firstMessage: (r.first_user_message || "").replace(/\n/g, " ").trim(),
+      cwd: r.cwd,
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+function getCodexRolloutPaths(): string[] {
+  if (!existsSync(CODEX_SESSIONS_DIR)) return [];
+
+  const walk = (dirPath: string): string[] =>
+    safeReaddir(dirPath).flatMap((name) => {
+      const path = join(dirPath, name);
+      if (isDirectory(path)) return walk(path);
+      return name.startsWith("rollout-") && name.endsWith(".jsonl") ? [path] : [];
+    });
+
+  return walk(CODEX_SESSIONS_DIR);
+}
+
+function getCodexSessions(): Session[] {
+  const dbSessions = getCodexSessionsFromDb();
+  if (dbSessions.length > 0) return dbSessions;
+
+  return getCodexRolloutPaths()
+    .map(parseCodexSession)
+    .filter((s): s is Session => s !== null);
+}
+
 // --- Combined ---
 
 function getAllSessions(): Session[] {
   const claude = getClaudeSessions();
   const opencode = getOpencodeSessions();
-  return [...claude, ...opencode];
+  const codex = getCodexSessions();
+  return [...claude, ...opencode, ...codex];
 }
 
 function findSession(sessionId: string): Session {
@@ -804,6 +1070,26 @@ function cmdSearch(term: string, opts: SearchOpts = {}) {
     }
   }
 
+  // Search Codex rollout files. This uses rollout JSONL even when the thread
+  // index is present because the SQLite index does not contain full messages.
+  const codexSessions = new Map(getCodexSessions().map((s) => [s.filePath, s]));
+  for (const filePath of getCodexRolloutPaths()) {
+    const records = readCodexRecords(filePath);
+    const parsedSession = codexSessions.get(filePath) || parseCodexSession(filePath);
+    if (!parsedSession) continue;
+
+    for (const record of records) {
+      const entry = codexSearchEntry(record);
+      if (!entry || !matchesTerm(entry.text, pt)) continue;
+      matches.push({
+        session: parsedSession,
+        matchLine: entry.text.replace(/\n/g, " ").trim(),
+        role: entry.role,
+      });
+      break;
+    }
+  }
+
   let filtered = matches;
   if (cwdFilter) {
     filtered = filtered.filter((m) => m.session.projectDir === cwdFilter);
@@ -845,8 +1131,10 @@ function cmdShow(sessionId: string, short: boolean) {
 
   if (session.source === "claude") {
     showClaudeSession(session, short, out);
-  } else {
+  } else if (session.source === "opencode") {
     showOpencodeSession(session, short, out);
+  } else {
+    showCodexSession(session, short, out);
   }
 
   const content = out.join("\n") + "\n";
@@ -964,6 +1252,33 @@ function showOpencodeSession(session: Session, short: boolean, out: string[]) {
   }
 }
 
+function showCodexSession(session: Session, short: boolean, out: string[]) {
+  const records = readCodexRecords(session.filePath);
+  if (records.length === 0) {
+    console.error(`Could not read Codex rollout file: ${session.filePath}`);
+    process.exit(1);
+  }
+
+  for (const entry of codexDisplayEntries(records)) {
+    const role = entry.role === "tool"
+      ? "Tool"
+      : entry.role === "user"
+        ? "User"
+        : "Assistant";
+    const time = entry.time ? formatDate(entry.time) : "";
+
+    if (short) {
+      out.push(`[${time}] ${role}:`);
+      out.push(`  ${truncate(entry.text.replace(/\n/g, " ").trim(), MAX_SHORT_MESSAGE)}`);
+      out.push("");
+    } else {
+      out.push(formatMessageHeader(role, time));
+      out.push(entry.text.trim());
+      out.push("");
+    }
+  }
+}
+
 function cmdResume(sessionId: string) {
   const session = findSession(sessionId);
 
@@ -974,10 +1289,16 @@ function cmdResume(sessionId: string) {
     process.exit(1);
   }
 
-  const command = session.source === "claude" ? "claude" : "opencode";
+  const command = session.source === "claude"
+    ? "claude"
+    : session.source === "opencode"
+      ? "opencode"
+      : "codex";
   const commandArgs = session.source === "claude"
     ? ["--dangerously-skip-permissions", "--resume", session.id]
-    : ["--session", session.id];
+    : session.source === "opencode"
+      ? ["--session", session.id]
+      : ["resume", session.id];
 
   console.log(`Resuming ${session.source} session ${shortId(session.id)} in ${session.projectDir}...`);
   try {
@@ -1044,6 +1365,19 @@ function cmdBackup(args: string[]) {
   }
   if (existsSync(OPENCODE_DB)) {
     sources.push({ path: OPENCODE_DB, label: tildify(OPENCODE_DB) });
+  }
+  if (existsSync(CODEX_SESSIONS_DIR)) {
+    sources.push({ path: CODEX_SESSIONS_DIR, label: tildify(CODEX_SESSIONS_DIR) });
+  }
+  for (const codexFile of [
+    CODEX_HISTORY_FILE,
+    CODEX_STATE_DB,
+    `${CODEX_STATE_DB}-wal`,
+    `${CODEX_STATE_DB}-shm`,
+  ]) {
+    if (existsSync(codexFile)) {
+      sources.push({ path: codexFile, label: tildify(codexFile) });
+    }
   }
 
   if (sources.length === 0) {
@@ -1280,7 +1614,7 @@ function main() {
   } else if (command === "help" || command === "--help" || command === "-h") {
     console.log(`Usage: ${BIN_NAME} [command]
 
-Searches and browses sessions from Claude Code and OpenCode.
+Searches and browses sessions from Claude Code, OpenCode, and OpenAI Codex.
 
 Commands:
   (none)              List all sessions grouped by project
@@ -1307,7 +1641,8 @@ Backup & Restore:
 
 Sources:
   Claude Code:  ~/.claude/projects/  (JSONL files)
-  OpenCode:     ~/.local/share/opencode/opencode.db  (SQLite)`);
+  OpenCode:     ~/.local/share/opencode/opencode.db  (SQLite)
+  Codex:        ~/.codex/sessions/ and ~/.codex/state_5.sqlite`);
   } else {
     console.error(`Unknown command: ${command}. Run "${BIN_NAME} help" for usage.`);
     process.exit(1);

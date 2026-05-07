@@ -3,12 +3,12 @@ name: ai-sessions
 description: >
   Use when the user asks to search past sessions, find previous conversations,
   look up how something was done before, or reference earlier AI interactions.
-  Searches across Claude Code and OpenCode session history with full-text search.
+  Searches across Claude Code, OpenCode, and Codex session history with full-text search.
 ---
 
 # AI Sessions Search
 
-Search and browse your Claude Code and OpenCode session history.
+Search and browse your Claude Code, OpenCode, and Codex session history.
 
 ## When to Use This Skill
 
@@ -116,7 +116,7 @@ ai-sessions resume <session-id>
 
 Automatically:
 - Changes to the original working directory
-- Launches `claude --resume` or `opencode --session` as appropriate
+- Launches `claude --resume`, `opencode --session`, or `codex resume` as appropriate
 - Continues the conversation where it left off
 
 ## Common Workflows

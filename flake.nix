@@ -1,5 +1,5 @@
 {
-  description = "ai-sessions - browse and search Claude Code and OpenCode sessions";
+  description = "ai-sessions - browse and search Claude Code, OpenCode, and Codex sessions";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
             '';
 
             meta = {
-              description = "Browse and search Claude Code and OpenCode sessions";
+              description = "Browse and search Claude Code, OpenCode, and Codex sessions";
               license = pkgs.lib.licenses.mit;
               mainProgram = "ai-sessions";
             };

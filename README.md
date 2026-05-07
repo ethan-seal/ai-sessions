@@ -1,6 +1,6 @@
 # ai-sessions
 
-A command-line tool for browsing, searching, and managing your [Claude Code](https://github.com/anthropics/claude-code) and [OpenCode](https://github.com/opencode-ai/opencode) session history.
+A command-line tool for browsing, searching, and managing your [Claude Code](https://github.com/anthropics/claude-code), [OpenCode](https://github.com/opencode-ai/opencode), and OpenAI Codex session history.
 
 ## Features
 
@@ -9,7 +9,7 @@ A command-line tool for browsing, searching, and managing your [Claude Code](htt
 - **View complete conversations** with formatted output and pager support
 - **Resume sessions** directly from the CLI
 - **Backup and restore** session data with automated retention policies
-- **Unified interface** for both Claude Code and OpenCode sessions
+- **Unified interface** for Claude Code, OpenCode, and Codex sessions
 - **Claude Code skill** for searching sessions within Claude conversations
 
 ## Claude Code Skill
@@ -89,7 +89,7 @@ Output example:
 ~/Programming/my-project (3 sessions, last active: 2024-01-15)
   2024-01-15 15:30  a1b2c3d4  [claude] "Add user authentication"
   2024-01-14 09:20  e5f6g7h8  [opencode] "Fix database migration"
-  2024-01-13 14:45  i9j0k1l2  [claude] "Refactor API endpoints"
+  2024-01-13 14:45  i9j0k1l2  [codex] "Refactor API endpoints"
 ```
 
 ### Search Sessions
@@ -134,7 +134,7 @@ The viewer displays:
 ai-sessions resume a1b2c3d4
 ```
 
-Automatically detects whether to launch `claude --resume` or `opencode --session`.
+Automatically detects whether to launch `claude --resume`, `opencode --session`, or `codex resume`.
 
 ### Backup & Restore
 
@@ -151,6 +151,8 @@ ai-sessions backup --dest ~/Dropbox/backups --keep 30
 Backup includes:
 - `~/.claude/projects/` (Claude Code JSONL files)
 - `~/.local/share/opencode/opencode.db` (OpenCode SQLite database)
+- `~/.codex/sessions/` (Codex rollout JSONL files)
+- `~/.codex/history.jsonl` and `~/.codex/state_5.sqlite` (Codex prompt history and thread index)
 
 List available backups:
 
@@ -221,6 +223,11 @@ systemctl --user status ai-sessions-backup.timer
 - Sessions table with metadata and titles
 - Messages and parts tables for conversation content
 
+**Codex** stores rollout transcripts in `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and keeps a thread index at `~/.codex/state_5.sqlite`:
+- The SQLite index is used for fast session listing when present
+- Rollout JSONL files are used for full search and transcript display
+- Internal metadata, developer/system instructions, and reasoning records are hidden from normal `show` output
+
 ### Project Path Detection
 
 For Claude sessions, the project directory is determined by:
@@ -239,7 +246,7 @@ Search performs case-insensitive substring matching across:
 - **Tool use inputs** (JSON-stringified for deep search)
 - **Tool results** (both string and structured content)
 
-For Claude sessions, the tool parses JSONL in a single pass for performance. For OpenCode sessions, it uses SQL queries with the SQLite FTS (full-text search) pattern.
+For Claude and Codex sessions, the tool parses JSONL in a single pass for performance. For OpenCode sessions, it uses SQL queries with the SQLite FTS (full-text search) pattern.
 
 ## Command Reference
 
@@ -270,6 +277,7 @@ Backup & Restore:
 The tool uses these default paths:
 - **Claude projects**: `~/.claude/projects/`
 - **OpenCode database**: `~/.local/share/opencode/opencode.db`
+- **Codex home**: `$CODEX_HOME` or `~/.codex/`
 - **Backup directory**: `~/.ai-sessions-backups/`
 - **Pager**: `$PAGER` environment variable (defaults to `less -R`)
 
@@ -277,7 +285,7 @@ The tool uses these default paths:
 
 - [Bun](https://bun.sh/) runtime
 - `tar` command for backups/restore
-- Optional: `claude` or `opencode` CLI for resume functionality
+- Optional: `claude`, `opencode`, or `codex` CLI for resume functionality
 
 ## Development
 

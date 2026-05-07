@@ -10,6 +10,10 @@ import { Database } from "bun:sqlite";
 var HOME = homedir();
 var CLAUDE_DIR = join(HOME, ".claude", "projects");
 var OPENCODE_DB = join(HOME, ".local", "share", "opencode", "opencode.db");
+var CODEX_HOME = process.env.CODEX_HOME ? untildify(process.env.CODEX_HOME) : join(HOME, ".codex");
+var CODEX_SESSIONS_DIR = join(CODEX_HOME, "sessions");
+var CODEX_STATE_DB = join(CODEX_HOME, "state_5.sqlite");
+var CODEX_HISTORY_FILE = join(CODEX_HOME, "history.jsonl");
 var DEFAULT_BACKUP_DIR = join(HOME, ".ai-sessions-backups");
 var MAX_TOOL_INPUT_DISPLAY = 200;
 var MAX_LIST_LABEL = 70;
@@ -32,6 +36,35 @@ function readJsonlRecords(filePath) {
     } catch {}
   }
   return records;
+}
+function asObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : "";
+}
+function readCodexRecords(filePath) {
+  let data;
+  try {
+    data = readFileSync(filePath, "utf-8");
+  } catch {
+    return [];
+  }
+  return data.split(`
+`).filter((l) => l.trim()).flatMap((line) => {
+    try {
+      const raw = asObject(JSON.parse(line));
+      if (!raw || typeof raw.type !== "string")
+        return [];
+      return [{
+        type: raw.type,
+        timestamp: stringValue(raw.timestamp) || undefined,
+        payload: asObject(raw.payload) || undefined
+      }];
+    } catch {
+      return [];
+    }
+  });
 }
 function tildify(path) {
   return path.startsWith(HOME) ? "~" + path.slice(HOME.length) : path;
@@ -144,7 +177,11 @@ function formatDateShort(iso) {
   return `${yyyy}-${mm}-${dd}`;
 }
 function sourceTag(source) {
-  return source === "claude" ? "[claude]" : "[opencode]";
+  if (source === "claude")
+    return "[claude]";
+  if (source === "opencode")
+    return "[opencode]";
+  return "[codex]";
 }
 function outputViaPager(content) {
   if (!process.stdout.isTTY) {
@@ -390,10 +427,190 @@ function getOpencodeSessions() {
     db.close();
   }
 }
+function codexContentText(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  return content.flatMap((item) => {
+    const obj = asObject(item);
+    const text = obj ? stringValue(obj.text) : "";
+    return text ? [text] : [];
+  }).join(`
+`);
+}
+function codexResponseItemEntry(record) {
+  const payload = record.payload;
+  if (!payload || record.type !== "response_item")
+    return null;
+  const payloadType = stringValue(payload.type);
+  if (payloadType === "message") {
+    const role = stringValue(payload.role);
+    if (role !== "user" && role !== "assistant")
+      return null;
+    const text = codexContentText(payload.content).trim();
+    if (!text)
+      return null;
+    if (role === "user" && isMetaOrCommand(text))
+      return null;
+    return { role, text, time: record.timestamp || "" };
+  }
+  if (payloadType === "function_call") {
+    const name = stringValue(payload.name) || "unknown_tool";
+    const args = stringValue(payload.arguments);
+    const text = args ? `[tool_call: ${name}]
+${args}` : `[tool_call: ${name}]`;
+    return { role: "tool", text, time: record.timestamp || "" };
+  }
+  if (payloadType === "function_call_output") {
+    const output = stringValue(payload.output).trim();
+    if (!output)
+      return null;
+    return { role: "tool", text: `[tool_result]
+${output}`, time: record.timestamp || "" };
+  }
+  return null;
+}
+function codexEventMessageEntry(record) {
+  const payload = record.payload;
+  if (!payload || record.type !== "event_msg")
+    return null;
+  const payloadType = stringValue(payload.type);
+  if (payloadType === "user_message") {
+    const text = stringValue(payload.message).trim();
+    return text ? { role: "user", text, time: record.timestamp || "" } : null;
+  }
+  if (payloadType === "agent_message") {
+    const text = stringValue(payload.message).trim();
+    return text ? { role: "assistant", text, time: record.timestamp || "" } : null;
+  }
+  return null;
+}
+function codexSearchEntry(record) {
+  return codexResponseItemEntry(record) || codexEventMessageEntry(record);
+}
+function codexDisplayEntries(records) {
+  const responseEntries = records.map(codexResponseItemEntry).filter((entry) => entry !== null);
+  if (responseEntries.some((entry) => entry.role !== "tool")) {
+    return responseEntries;
+  }
+  return records.map(codexEventMessageEntry).filter((entry) => entry !== null);
+}
+function codexFirstUserMessage(records) {
+  for (const record of records) {
+    const entry = codexSearchEntry(record);
+    if (entry?.role === "user" && !isMetaOrCommand(entry.text)) {
+      return entry.text.replace(/\n/g, " ").trim();
+    }
+  }
+  return "";
+}
+function parseCodexSession(filePath) {
+  const records = readCodexRecords(filePath);
+  if (records.length === 0)
+    return null;
+  let sessionId = "";
+  let cwd = "";
+  let startTime = "";
+  let endTime = "";
+  for (const record of records) {
+    if (record.timestamp) {
+      if (!startTime || record.timestamp < startTime)
+        startTime = record.timestamp;
+      if (!endTime || record.timestamp > endTime)
+        endTime = record.timestamp;
+    }
+    if (record.type === "session_meta" && record.payload) {
+      if (!sessionId)
+        sessionId = stringValue(record.payload.id);
+      if (!cwd)
+        cwd = stringValue(record.payload.cwd);
+      const created = stringValue(record.payload.timestamp);
+      if (created && (!startTime || created < startTime))
+        startTime = created;
+    }
+  }
+  const firstMessage = codexFirstUserMessage(records);
+  if (!sessionId || !firstMessage)
+    return null;
+  return {
+    id: sessionId,
+    source: "codex",
+    projectDir: cwd ? tildify(cwd) : tildify(join(filePath, "..")),
+    filePath,
+    startTime,
+    endTime,
+    title: "",
+    firstMessage,
+    cwd
+  };
+}
+function codexIsoFromTime(ms, seconds) {
+  const millis = ms ?? seconds * 1000;
+  return millis ? new Date(millis).toISOString() : "";
+}
+function getCodexSessionsFromDb() {
+  if (!existsSync(CODEX_STATE_DB))
+    return [];
+  let db;
+  try {
+    db = new Database(CODEX_STATE_DB, { readonly: true });
+  } catch {
+    return [];
+  }
+  try {
+    const rows = db.query(`
+      SELECT
+        id,
+        rollout_path,
+        created_at_ms,
+        updated_at_ms,
+        created_at,
+        updated_at,
+        cwd,
+        title,
+        first_user_message
+      FROM threads
+      WHERE archived = 0
+      ORDER BY updated_at_ms DESC, updated_at DESC
+    `).all();
+    return rows.map((r) => ({
+      id: r.id,
+      source: "codex",
+      projectDir: tildify(r.cwd),
+      filePath: r.rollout_path,
+      startTime: codexIsoFromTime(r.created_at_ms, r.created_at),
+      endTime: codexIsoFromTime(r.updated_at_ms, r.updated_at),
+      title: r.title || "",
+      firstMessage: (r.first_user_message || "").replace(/\n/g, " ").trim(),
+      cwd: r.cwd
+    }));
+  } finally {
+    db.close();
+  }
+}
+function getCodexRolloutPaths() {
+  if (!existsSync(CODEX_SESSIONS_DIR))
+    return [];
+  const walk = (dirPath) => safeReaddir(dirPath).flatMap((name) => {
+    const path = join(dirPath, name);
+    if (isDirectory(path))
+      return walk(path);
+    return name.startsWith("rollout-") && name.endsWith(".jsonl") ? [path] : [];
+  });
+  return walk(CODEX_SESSIONS_DIR);
+}
+function getCodexSessions() {
+  const dbSessions = getCodexSessionsFromDb();
+  if (dbSessions.length > 0)
+    return dbSessions;
+  return getCodexRolloutPaths().map(parseCodexSession).filter((s) => s !== null);
+}
 function getAllSessions() {
   const claude = getClaudeSessions();
   const opencode = getOpencodeSessions();
-  return [...claude, ...opencode];
+  const codex = getCodexSessions();
+  return [...claude, ...opencode, ...codex];
 }
 function findSession(sessionId) {
   const sessions = getAllSessions();
@@ -564,6 +781,24 @@ function cmdSearch(term, opts = {}) {
       db?.close();
     }
   }
+  const codexSessions = new Map(getCodexSessions().map((s) => [s.filePath, s]));
+  for (const filePath of getCodexRolloutPaths()) {
+    const records = readCodexRecords(filePath);
+    const parsedSession = codexSessions.get(filePath) || parseCodexSession(filePath);
+    if (!parsedSession)
+      continue;
+    for (const record of records) {
+      const entry = codexSearchEntry(record);
+      if (!entry || !matchesTerm(entry.text, pt))
+        continue;
+      matches.push({
+        session: parsedSession,
+        matchLine: entry.text.replace(/\n/g, " ").trim(),
+        role: entry.role
+      });
+      break;
+    }
+  }
   let filtered = matches;
   if (cwdFilter) {
     filtered = filtered.filter((m) => m.session.projectDir === cwdFilter);
@@ -603,8 +838,10 @@ Session: ${session.id}`);
 `);
   if (session.source === "claude") {
     showClaudeSession(session, short, out);
-  } else {
+  } else if (session.source === "opencode") {
     showOpencodeSession(session, short, out);
+  } else {
+    showCodexSession(session, short, out);
   }
   const content = out.join(`
 `) + `
@@ -715,6 +952,26 @@ function showOpencodeSession(session, short, out) {
     db.close();
   }
 }
+function showCodexSession(session, short, out) {
+  const records = readCodexRecords(session.filePath);
+  if (records.length === 0) {
+    console.error(`Could not read Codex rollout file: ${session.filePath}`);
+    process.exit(1);
+  }
+  for (const entry of codexDisplayEntries(records)) {
+    const role = entry.role === "tool" ? "Tool" : entry.role === "user" ? "User" : "Assistant";
+    const time = entry.time ? formatDate(entry.time) : "";
+    if (short) {
+      out.push(`[${time}] ${role}:`);
+      out.push(`  ${truncate(entry.text.replace(/\n/g, " ").trim(), MAX_SHORT_MESSAGE)}`);
+      out.push("");
+    } else {
+      out.push(formatMessageHeader(role, time));
+      out.push(entry.text.trim());
+      out.push("");
+    }
+  }
+}
 function cmdResume(sessionId) {
   const session = findSession(sessionId);
   const cwd = session.cwd || untildify(session.projectDir);
@@ -722,8 +979,8 @@ function cmdResume(sessionId) {
     console.error(`Working directory no longer exists: ${cwd}`);
     process.exit(1);
   }
-  const command = session.source === "claude" ? "claude" : "opencode";
-  const commandArgs = session.source === "claude" ? ["--dangerously-skip-permissions", "--resume", session.id] : ["--session", session.id];
+  const command = session.source === "claude" ? "claude" : session.source === "opencode" ? "opencode" : "codex";
+  const commandArgs = session.source === "claude" ? ["--dangerously-skip-permissions", "--resume", session.id] : session.source === "opencode" ? ["--session", session.id] : ["resume", session.id];
   console.log(`Resuming ${session.source} session ${shortId(session.id)} in ${session.projectDir}...`);
   try {
     spawnSync(command, commandArgs, { cwd, stdio: "inherit" });
@@ -775,6 +1032,19 @@ function cmdBackup(args) {
   }
   if (existsSync(OPENCODE_DB)) {
     sources.push({ path: OPENCODE_DB, label: tildify(OPENCODE_DB) });
+  }
+  if (existsSync(CODEX_SESSIONS_DIR)) {
+    sources.push({ path: CODEX_SESSIONS_DIR, label: tildify(CODEX_SESSIONS_DIR) });
+  }
+  for (const codexFile of [
+    CODEX_HISTORY_FILE,
+    CODEX_STATE_DB,
+    `${CODEX_STATE_DB}-wal`,
+    `${CODEX_STATE_DB}-shm`
+  ]) {
+    if (existsSync(codexFile)) {
+      sources.push({ path: codexFile, label: tildify(codexFile) });
+    }
   }
   if (sources.length === 0) {
     console.log("Nothing to back up: no session data found.");
@@ -982,7 +1252,7 @@ function main() {
   } else if (command === "help" || command === "--help" || command === "-h") {
     console.log(`Usage: ${BIN_NAME} [command]
 
-Searches and browses sessions from Claude Code and OpenCode.
+Searches and browses sessions from Claude Code, OpenCode, and OpenAI Codex.
 
 Commands:
   (none)              List all sessions grouped by project
@@ -1009,7 +1279,8 @@ Backup & Restore:
 
 Sources:
   Claude Code:  ~/.claude/projects/  (JSONL files)
-  OpenCode:     ~/.local/share/opencode/opencode.db  (SQLite)`);
+  OpenCode:     ~/.local/share/opencode/opencode.db  (SQLite)
+  Codex:        ~/.codex/sessions/ and ~/.codex/state_5.sqlite`);
   } else {
     console.error(`Unknown command: ${command}. Run "${BIN_NAME} help" for usage.`);
     process.exit(1);
