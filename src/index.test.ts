@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { findTermIndex, parseTerm, snippetAround } from "./index";
 
 test("word-boundary previews center on the accepted match", () => {
-  const text = "jail " + "x".repeat(80) + " jai";
+  const text = `jail ${"x".repeat(80)} jai`;
   const term = parseTerm("\\bjai\\b");
 
   expect(findTermIndex(text, term)).toBe(text.lastIndexOf("jai"));
@@ -11,7 +11,7 @@ test("word-boundary previews center on the accepted match", () => {
 });
 
 test("plain substring previews still use the first substring match", () => {
-  const text = "jail " + "x".repeat(80) + " jai";
+  const text = `jail ${"x".repeat(80)} jai`;
   const term = parseTerm("jai");
 
   expect(findTermIndex(text, term)).toBe(0);

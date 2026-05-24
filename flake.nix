@@ -27,12 +27,11 @@
               runHook preInstall
 
               mkdir -p $out/lib/ai-sessions
-              cp src/index.ts $out/lib/ai-sessions/
-              cp package.json $out/lib/ai-sessions/
+              cp -r src package.json $out/lib/ai-sessions/
 
               mkdir -p $out/bin
               makeWrapper ${pkgs.bun}/bin/bun $out/bin/ai-sessions \
-                --add-flags "run $out/lib/ai-sessions/index.ts"
+                --add-flags "run $out/lib/ai-sessions/src/index.ts"
 
               runHook postInstall
             '';
@@ -45,57 +44,17 @@
           };
         });
 
-      homeManagerModules.default = { config, lib, pkgs, ... }:
+      devShells = forAllSystems (system:
         let
-          cfg = config.services.ai-sessions-backup;
+          pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          options.services.ai-sessions-backup = {
-            enable = lib.mkEnableOption "automatic AI sessions backups";
-
-            package = lib.mkOption {
-              type = lib.types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-              description = "The ai-sessions package to use.";
-            };
-
-            frequency = lib.mkOption {
-              type = lib.types.str;
-              default = "daily";
-              description = "systemd calendar expression for backup frequency.";
-            };
-
-            keep = lib.mkOption {
-              type = lib.types.int;
-              default = 10;
-              description = "Number of backups to retain.";
-            };
-
-            destination = lib.mkOption {
-              type = lib.types.str;
-              default = "~/.ai-sessions-backups";
-              description = "Directory to store backups in.";
-            };
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.biome
+              pkgs.bun
+            ];
           };
-
-          config = lib.mkIf cfg.enable {
-            systemd.user.services.ai-sessions-backup = {
-              Unit.Description = "AI Sessions Backup";
-              Service = {
-                Type = "oneshot";
-                ExecStart = "${cfg.package}/bin/ai-sessions backup --dest ${cfg.destination} --keep ${toString cfg.keep}";
-              };
-            };
-
-            systemd.user.timers.ai-sessions-backup = {
-              Unit.Description = "Daily AI Sessions Backup";
-              Timer = {
-                OnCalendar = cfg.frequency;
-                Persistent = true;
-              };
-              Install.WantedBy = [ "timers.target" ];
-            };
-          };
-        };
+        });
     };
 }
