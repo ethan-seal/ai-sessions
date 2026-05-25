@@ -14,6 +14,7 @@
       packages = forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          gitSha = if self ? rev then self.rev else if self ? dirtyRev then self.dirtyRev else "unknown";
         in
         {
           default = pkgs.stdenv.mkDerivation {
@@ -28,6 +29,7 @@
 
               mkdir -p $out/lib/ai-sessions
               cp -r src package.json $out/lib/ai-sessions/
+              printf '%s\n' '{"gitSha":"${gitSha}"}' > $out/lib/ai-sessions/build-info.json
 
               mkdir -p $out/bin
               makeWrapper ${pkgs.bun}/bin/bun $out/bin/ai-sessions \

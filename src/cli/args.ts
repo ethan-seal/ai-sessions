@@ -15,6 +15,7 @@ export type CliCommand =
       readonly short: boolean;
     }
   | { readonly kind: "resume"; readonly sessionId: string }
+  | { readonly kind: "version" }
   | { readonly kind: "help" };
 
 export function parseCliArgs(args: readonly string[]): CliCommand {
@@ -34,6 +35,9 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
   }
   if (command === "help" || command === "--help" || command === "-h") {
     return { kind: "help" };
+  }
+  if (command === "version" || command === "--version" || command === "-V") {
+    return { kind: "version" };
   }
 
   throw new Error(

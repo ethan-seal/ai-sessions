@@ -6,6 +6,7 @@ export function helpText(): string {
 Searches and browses sessions from Claude Code, OpenCode, and OpenAI Codex.
 
 Commands:
+  --version           Show CLI version and git SHA
   (none)              List all sessions grouped by project
   list [filter]       List sessions, optionally filtered by project name
     --cwd               Only show sessions for the current directory

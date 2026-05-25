@@ -4,6 +4,7 @@ import { cmdSearch } from "../commands/search";
 import { cmdShow } from "../commands/show";
 import { type CliCommand, parseCliArgs } from "./args";
 import { helpText } from "./help";
+import { versionText } from "./version";
 
 export async function runCli(argv: readonly string[]): Promise<void> {
   let command: CliCommand;
@@ -26,6 +27,9 @@ export async function runCli(argv: readonly string[]): Promise<void> {
       return;
     case "resume":
       await cmdResume(command.sessionId);
+      return;
+    case "version":
+      console.log(versionText());
       return;
     case "help":
       console.log(helpText());

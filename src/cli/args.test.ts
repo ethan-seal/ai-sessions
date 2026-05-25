@@ -31,6 +31,10 @@ test("parses multi-word search terms", () => {
   });
 });
 
+test("parses version flag", () => {
+  expect(parseCliArgs(["--version"])).toEqual({ kind: "version" });
+});
+
 test("rejects missing search term", () => {
   expect(() => parseCliArgs(["search"])).toThrow(
     "Usage: ai-sessions search <term>",
