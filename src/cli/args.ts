@@ -57,6 +57,8 @@ function parseListArgs(args: readonly string[]): CliCommand {
       opts.days = parsePositiveInt(args[++i] ?? "", "--days");
     } else if (arg === "--limit" && args[i + 1]) {
       opts.limit = parsePositiveInt(args[++i] ?? "", "--limit");
+    } else if (arg === "--include-evals") {
+      opts.includeEvals = true;
     } else if (arg && !arg.startsWith("--")) {
       filter = arg;
     }
@@ -75,13 +77,17 @@ function parseSearchArgs(args: readonly string[]): CliCommand {
       opts.cwd = true;
     } else if (arg === "--days" && args[i + 1]) {
       opts.days = parsePositiveInt(args[++i] ?? "", "--days");
+    } else if (arg === "--include-evals") {
+      opts.includeEvals = true;
     } else if (arg) {
       termParts.push(arg);
     }
   }
 
   if (termParts.length === 0) {
-    throw new Error(`Usage: ${BIN_NAME} search <term> [--cwd] [--days <n>]`);
+    throw new Error(
+      `Usage: ${BIN_NAME} search <term> [--cwd] [--days <n>] [--include-evals]`,
+    );
   }
 
   return { kind: "search", term: termParts.join(" "), opts };

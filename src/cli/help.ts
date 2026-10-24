@@ -12,9 +12,11 @@ Commands:
     --cwd               Only show sessions for the current directory
     --days <n>          Only show sessions active in the last n days
     --limit <n>         Max sessions to show per directory
+    --include-evals     Include skill trigger-eval runs
   search <term>       Full-text search across all session messages
     --cwd               Only search sessions for the current directory
     --days <n>          Only search sessions active in the last n days
+    --include-evals     Include skill trigger-eval runs
   show <session-id>   Show full conversation for a session
     --short             Truncated overview (200 chars per message)
   resume <session-id> Resume a session in its original directory

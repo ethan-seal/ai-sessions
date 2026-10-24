@@ -174,6 +174,7 @@ function getCodexSessionsFromDb(): SessionSummary[] {
       startedAt: codexIsoFromTime(row.created_at_ms, row.created_at),
       lastActiveAt: codexIsoFromTime(row.updated_at_ms, row.updated_at),
       backingRef: row.rollout_path,
+      skillEval: false,
     }));
   } finally {
     db.close();
@@ -232,6 +233,7 @@ function parseCodexSession(filePath: string): SessionSummary | null {
     startedAt: startTime,
     lastActiveAt: endTime,
     backingRef: filePath,
+    skillEval: false,
   };
 }
 

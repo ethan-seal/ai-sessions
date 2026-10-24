@@ -205,6 +205,7 @@ function sessionFromRow(row: OpencodeSessionRow): SessionSummary {
     startedAt: new Date(row.time_created).toISOString(),
     lastActiveAt: new Date(row.time_updated).toISOString(),
     backingRef: "",
+    skillEval: false,
   };
 }
 
@@ -219,6 +220,7 @@ function sessionFromSearchRow(row: OpencodeSearchRow): SessionSummary {
     startedAt: new Date(row.time_created).toISOString(),
     lastActiveAt: new Date(row.time_updated).toISOString(),
     backingRef: "",
+    skillEval: false,
   };
 }
 

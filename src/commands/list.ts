@@ -9,10 +9,14 @@ export interface ListOpts {
   cwd?: boolean;
   days?: number;
   limit?: number;
+  includeEvals?: boolean;
 }
 
 export async function cmdList(filter?: string, opts: ListOpts = {}) {
   let sessions = await discoverSessions(getSessionSources());
+  if (!opts.includeEvals) {
+    sessions = sessions.filter((session) => !session.skillEval);
+  }
 
   if (opts.days !== undefined) {
     const cutoff = sessionCutoff(opts.days);

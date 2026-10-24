@@ -31,6 +31,21 @@ test("parses multi-word search terms", () => {
   });
 });
 
+test("parses list --include-evals", () => {
+  expect(parseCliArgs(["list", "--include-evals"])).toEqual({
+    kind: "list",
+    opts: { includeEvals: true },
+  });
+});
+
+test("parses search --include-evals without adding it to the term", () => {
+  expect(parseCliArgs(["search", "foo", "--include-evals"])).toEqual({
+    kind: "search",
+    term: "foo",
+    opts: { includeEvals: true },
+  });
+});
+
 test("parses version flag", () => {
   expect(parseCliArgs(["--version"])).toEqual({ kind: "version" });
 });

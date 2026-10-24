@@ -7,6 +7,7 @@ import { sessionCutoff } from "./shared";
 export interface SearchOpts {
   cwd?: boolean;
   days?: number;
+  includeEvals?: boolean;
 }
 
 export async function cmdSearch(term: string, opts: SearchOpts = {}) {
@@ -15,6 +16,9 @@ export async function cmdSearch(term: string, opts: SearchOpts = {}) {
   const matches = await searchSessions(getSessionSources(), term);
 
   let filtered = matches;
+  if (!opts.includeEvals) {
+    filtered = filtered.filter((match) => !match.session.skillEval);
+  }
   if (cwdFilter) {
     filtered = filtered.filter(
       (match) => match.session.projectDir === cwdFilter,

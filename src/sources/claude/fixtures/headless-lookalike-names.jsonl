@@ -1,0 +1,5 @@
+{"type":"queue-operation","operation":"enqueue","sessionId":"44444444-4444-4444-8444-444444444444","timestamp":"2026-10-22T20:41:02.827Z"}
+{"type":"user","entrypoint":"sdk-cli","sessionId":"44444444-4444-4444-8444-444444444444","cwd":"/tmp/fixture-project","timestamp":"2026-10-22T20:41:03.378Z","message":{"role":"user","content":"Rebuild my system"}}
+{"type":"attachment","entrypoint":"sdk-cli","sessionId":"44444444-4444-4444-8444-444444444444","cwd":"/tmp/fixture-project","timestamp":"2026-10-22T20:41:03.380Z","attachment":{"type":"skill_listing","isInitial":true,"skillCount":2,"names":["commit","typescript"],"content":"- commit\n- typescript"}}
+{"type":"attachment","entrypoint":"sdk-cli","sessionId":"44444444-4444-4444-8444-444444444444","cwd":"/tmp/fixture-project","timestamp":"2026-10-22T20:41:04.000Z","attachment":{"type":"skill_listing","isInitial":false,"skillCount":2,"names":["nixos","my-skill-helper"],"content":"delta"}}
+{"type":"assistant","sessionId":"44444444-4444-4444-8444-444444444444","cwd":"/tmp/fixture-project","timestamp":"2026-10-22T20:41:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}

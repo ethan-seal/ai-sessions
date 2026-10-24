@@ -10,6 +10,7 @@ export interface SessionSummary {
   readonly startedAt: string;
   readonly lastActiveAt: string;
   readonly backingRef: string;
+  readonly skillEval: boolean;
 }
 
 export interface ProjectGroup {

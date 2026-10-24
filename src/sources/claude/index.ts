@@ -15,6 +15,7 @@ import { HOME, tildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
 
 const CLAUDE_DIR = join(HOME, ".claude", "projects");
+const SKILL_EVAL_COMMAND = /-skill-[0-9a-f]{8}$/;
 
 export const claudeSource: SessionSource = {
   source: "claude",
@@ -51,10 +52,12 @@ interface ToolResultBlock {
 type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
 
 interface JsonlRecord {
-  type: "user" | "assistant";
+  type: "user" | "assistant" | "attachment";
   isMeta?: boolean;
   sessionId?: string;
   cwd?: string;
+  entrypoint?: string;
+  attachment?: { type?: string; names?: string[] };
   timestamp?: string;
   message?: {
     role: "user" | "assistant";
@@ -143,28 +146,30 @@ export function getClaudeResumeTarget(sessionId: string): ResumeTarget {
   };
 }
 
-function parseClaudeSession(filePath: string): SessionSummary | null {
+export function parseClaudeSession(filePath: string): SessionSummary | null {
   return parseClaudeRecords(filePath, readClaudeRecords(filePath));
 }
 
 function transcriptEntriesForRecord(record: JsonlRecord): TranscriptEntry[] {
+  const role = record.type;
+  if (role !== "user" && role !== "assistant") return [];
   if (record.isMeta || !record.timestamp) return [];
 
   const content = record.message?.content;
   if (!content) return [];
 
   if (typeof content === "string") {
-    if (record.type === "user" && isMetaOrCommand(content)) return [];
-    return [{ timestamp: record.timestamp, role: record.type, text: content }];
+    if (role === "user" && isMetaOrCommand(content)) return [];
+    return [{ timestamp: record.timestamp, role, text: content }];
   }
 
   return content.flatMap((block): TranscriptEntry[] => {
     if (block.type === "text") {
-      if (record.type === "user" && isMetaOrCommand(block.text)) return [];
+      if (role === "user" && isMetaOrCommand(block.text)) return [];
       return [
         {
           timestamp: record.timestamp ?? "",
-          role: record.type,
+          role,
           text: block.text,
         },
       ];
@@ -203,6 +208,8 @@ function parseClaudeRecords(
   let startTime = "";
   let endTime = "";
   let firstMessage = "";
+  let headless = false;
+  let hasEvalCommand = false;
 
   for (const record of records) {
     if (record.timestamp) {
@@ -216,6 +223,15 @@ function parseClaudeRecords(
     }
     if (record.type === "user" && record.cwd && !cwd) {
       cwd = record.cwd;
+    }
+    if (record.type === "user" && record.entrypoint === "sdk-cli") {
+      headless = true;
+    }
+    if (
+      record.attachment?.type === "skill_listing" &&
+      record.attachment.names?.some((name) => SKILL_EVAL_COMMAND.test(name))
+    ) {
+      hasEvalCommand = true;
     }
 
     if (
@@ -246,6 +262,7 @@ function parseClaudeRecords(
     startedAt: startTime,
     lastActiveAt: endTime,
     backingRef: filePath,
+    skillEval: headless && hasEvalCommand,
   };
 }
 
