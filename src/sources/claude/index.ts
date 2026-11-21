@@ -7,7 +7,11 @@ import type {
   SearchMatchRole,
   SearchResult,
 } from "../../domain/search";
-import { matchesTerm } from "../../domain/search";
+import {
+  buildPrefilter,
+  matchesTerm,
+  type TextPrefilter,
+} from "../../domain/search";
 import type { SessionSummary } from "../../domain/session";
 import type { Transcript, TranscriptEntry } from "../../domain/transcript";
 import {
@@ -15,7 +19,12 @@ import {
   isDirectory,
   safeReaddir,
 } from "../../shared/fs";
-import { readJsonlObjects } from "../../shared/jsonl";
+import {
+  bufferLines,
+  parseJsonLine,
+  readFileBytes,
+  readJsonlObjects,
+} from "../../shared/jsonl";
 import { isMetaOrCommand, singleLine } from "../../shared/messages";
 import { HOME, tildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
@@ -93,31 +102,45 @@ export async function discoverClaudeSessions(): Promise<SessionSummary[]> {
 export async function searchClaudeSessions(
   term: ParsedSearchTerm,
 ): Promise<SearchResult[]> {
+  const mayMatch = buildPrefilter(term);
   return from(await getClaudeJsonlPaths())
-    .mapConcurrent((filePath) => searchClaudeFile(filePath, term), {
+    .mapConcurrent((filePath) => searchClaudeFile(filePath, term, mayMatch), {
       limit: FILE_READ_CONCURRENCY,
     })
     .filter((result): result is SearchResult => result !== null)
     .toArray();
 }
 
+/** The first matching record in a file, parsing only the files and lines that could match. */
 async function searchClaudeFile(
   filePath: string,
   term: ParsedSearchTerm,
+  mayMatch: TextPrefilter,
 ): Promise<SearchResult | null> {
-  const records = await readClaudeRecords(filePath);
-  const session = parseClaudeRecords(filePath, records);
+  const bytes = await readFileBytes(filePath);
+  // Latin1 keeps ASCII bytes as they are, so a whole file is checked without decoding UTF-8.
+  if (!bytes || !mayMatch(bytes.toString("latin1"))) return null;
+
+  const hit = await bufferLines(bytes)
+    .filter(mayMatch)
+    .map((line) => parseJsonLine(line, asClaudeRecord))
+    .filter((record): record is JsonlRecord => record !== null)
+    .map((record) => ({ record, matchRole: matchRoleInRecord(record, term) }))
+    .find((candidate) => candidate.matchRole !== null);
+  if (!hit?.matchRole) return null;
+
+  // Only files with a match pay for the full parse that builds the summary.
+  const session = await parseClaudeSession(filePath);
   if (!session) return null;
 
-  for (const record of records) {
-    const matchRole = matchRoleInRecord(record, term);
-    if (!matchRole) continue;
-
-    const extracted = extractSearchableText(record);
-    const matchedText = extracted ? singleLine(extracted.text) : "";
-    return { session, matchRole, preview: matchedText, matchedText };
-  }
-  return null;
+  const extracted = extractSearchableText(hit.record);
+  const matchedText = extracted ? singleLine(extracted.text) : "";
+  return {
+    session,
+    matchRole: hit.matchRole,
+    preview: matchedText,
+    matchedText,
+  };
 }
 
 export async function loadClaudeTranscript(
@@ -244,7 +267,11 @@ function isSkillEval(
 }
 
 function readClaudeRecords(filePath: string): Promise<JsonlRecord[]> {
-  return readJsonlObjects(filePath, (value) => value as JsonlRecord);
+  return readJsonlObjects(filePath, asClaudeRecord);
+}
+
+function asClaudeRecord(value: unknown): JsonlRecord {
+  return value as JsonlRecord;
 }
 
 function stringifyToolInput(input: Record<string, unknown>): string {

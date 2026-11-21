@@ -52,6 +52,32 @@ export function findTermIndex(haystack: string, pt: ParsedSearchTerm): number {
   }
 }
 
+/** Characters that appear in JSON text exactly as they appear in the string they encode. */
+const JSON_VERBATIM = /^[\x20\x21\x23-\x5b\x5d-\x7e]+$/;
+
+/** Returns false only for text that cannot contain a match. */
+export type TextPrefilter = (rawText: string) => boolean;
+
+/**
+ * Builds a cheap pre-check on raw JSONL text (a line, or a whole file decoded
+ * as latin1), run before paying for JSON.parse. False means the text cannot
+ * hold a match and can be skipped unparsed; true means it might.
+ *
+ * A match inside a JSON string appears verbatim in the raw text, unless the
+ * term contains something JSON escapes (a quote, a backslash, a control
+ * character) or non-ASCII text a writer may have \u-escaped. Those terms get a
+ * filter that always says "maybe". The check is a case-insensitive regex, which
+ * for an ASCII term folds case exactly as `findTermIndex` does.
+ */
+export function buildPrefilter(pt: ParsedSearchTerm): TextPrefilter {
+  if (!JSON_VERBATIM.test(pt.text)) return () => true;
+  const pattern = new RegExp(
+    pt.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    "i",
+  );
+  return (rawText) => pattern.test(rawText);
+}
+
 export function matchesTerm(haystack: string, pt: ParsedSearchTerm): boolean {
   return findTermIndex(haystack, pt) !== -1;
 }

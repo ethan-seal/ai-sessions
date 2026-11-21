@@ -4,7 +4,11 @@ import { basename, dirname, join } from "node:path";
 import { from } from "functools";
 import type { ResumeTarget } from "../../domain/resume";
 import type { ParsedSearchTerm, SearchResult } from "../../domain/search";
-import { matchesTerm } from "../../domain/search";
+import {
+  buildPrefilter,
+  matchesTerm,
+  type TextPrefilter,
+} from "../../domain/search";
 import type { SessionSummary } from "../../domain/session";
 import type { Transcript, TranscriptEntry } from "../../domain/transcript";
 import {
@@ -12,7 +16,12 @@ import {
   isDirectory,
   safeReaddir,
 } from "../../shared/fs";
-import { readJsonlObjects } from "../../shared/jsonl";
+import {
+  bufferLines,
+  parseJsonLine,
+  readFileBytes,
+  readJsonlObjects,
+} from "../../shared/jsonl";
 import { isMetaOrCommand, singleLine } from "../../shared/messages";
 import { HOME, tildify, untildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
@@ -83,14 +92,24 @@ export async function searchCodexSessions(
     ]),
   );
 
+  const mayMatch = buildPrefilter(term);
   return from(await getCodexRolloutPaths())
     .mapConcurrent(
-      async (filePath) => {
-        const [records, session] = await Promise.all([
-          readCodexRecords(filePath),
-          sessions.get(filePath) ?? parseCodexSession(filePath),
-        ]);
-        return session ? searchCodexRecords(session, records, term) : null;
+      async (filePath): Promise<SearchResult | null> => {
+        const hit = await findCodexMatch(filePath, term, mayMatch);
+        if (!hit) return null;
+
+        const session =
+          sessions.get(filePath) ?? (await parseCodexSession(filePath));
+        if (!session) return null;
+
+        const matchedText = singleLine(hit.text);
+        return {
+          session,
+          matchRole: hit.role,
+          preview: matchedText,
+          matchedText,
+        };
       },
       { limit: FILE_READ_CONCURRENCY },
     )
@@ -98,18 +117,25 @@ export async function searchCodexSessions(
     .toArray();
 }
 
-function searchCodexRecords(
-  session: SessionSummary,
-  records: readonly CodexRecord[],
+/** The first record of a rollout file that matches, parsing only files and lines that could. */
+async function findCodexMatch(
+  filePath: string,
   term: ParsedSearchTerm,
-): SearchResult | null {
-  const hit = records
-    .map(codexSearchEntry)
-    .find((entry) => entry !== null && matchesTerm(entry.text, term));
-  if (!hit) return null;
+  mayMatch: TextPrefilter,
+): Promise<CodexTranscriptEntry | undefined> {
+  const bytes = await readFileBytes(filePath);
+  // Latin1 keeps ASCII bytes as they are, so a whole file is checked without decoding UTF-8.
+  if (!bytes || !mayMatch(bytes.toString("latin1"))) return undefined;
 
-  const matchedText = singleLine(hit.text);
-  return { session, matchRole: hit.role, preview: matchedText, matchedText };
+  return bufferLines(bytes)
+    .filter(mayMatch)
+    .map((line) => parseJsonLine(line, asCodexRecord))
+    .filter((record): record is CodexRecord => record !== null)
+    .map(codexSearchEntry)
+    .find(
+      (entry): entry is CodexTranscriptEntry =>
+        entry !== null && matchesTerm(entry.text, term),
+    );
 }
 
 export async function loadCodexTranscript(
@@ -132,15 +158,17 @@ export function getCodexResumeTarget(session: SessionSummary): ResumeTarget {
 }
 
 function readCodexRecords(filePath: string): Promise<CodexRecord[]> {
-  return readJsonlObjects(filePath, (value) => {
-    const raw = asObject(value);
-    if (!raw || typeof raw.type !== "string") return null;
-    return {
-      type: raw.type,
-      timestamp: stringValue(raw.timestamp) || undefined,
-      payload: asObject(raw.payload) || undefined,
-    };
-  });
+  return readJsonlObjects(filePath, asCodexRecord);
+}
+
+function asCodexRecord(value: unknown): CodexRecord | null {
+  const raw = asObject(value);
+  if (!raw || typeof raw.type !== "string") return null;
+  return {
+    type: raw.type,
+    timestamp: stringValue(raw.timestamp) || undefined,
+    payload: asObject(raw.payload) || undefined,
+  };
 }
 
 function getCodexSessionsFromDb(): SessionSummary[] {
