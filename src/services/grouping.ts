@@ -3,30 +3,28 @@ import type { ProjectGroup, SessionSummary } from "../domain/session";
 export function groupByProject(
   sessions: readonly SessionSummary[],
 ): ProjectGroup[] {
-  const groups = new Map<string, SessionSummary[]>();
-
-  for (const session of sessions) {
-    const existing = groups.get(session.projectDir) ?? [];
-    existing.push(session);
-    groups.set(session.projectDir, existing);
-  }
-
-  return Array.from(groups.entries())
-    .map(([projectDir, projectSessions]) => {
-      projectSessions.sort((a, b) => sessionTime(b) - sessionTime(a));
-      const first = projectSessions[0];
+  return Array.from(
+    Map.groupBy(sessions, (session) => session.projectDir),
+    ([projectDir, projectSessions]) => {
+      const sorted = projectSessions.toSorted(
+        (a, b) => sessionTime(b) - sessionTime(a),
+      );
       return {
         projectDir,
-        sessions: projectSessions,
-        lastActiveAt: first?.lastActiveAt || first?.startedAt || "",
+        sessions: sorted,
+        lastActiveAt: sessionActivity(sorted[0]),
       };
-    })
-    .sort(
-      (a, b) =>
-        new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
-    );
+    },
+  ).sort(
+    (a, b) =>
+      new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
+  );
+}
+
+function sessionActivity(session: SessionSummary | undefined): string {
+  return session?.lastActiveAt || session?.startedAt || "";
 }
 
 function sessionTime(session: SessionSummary): number {
-  return new Date(session.lastActiveAt || session.startedAt).getTime();
+  return new Date(sessionActivity(session)).getTime();
 }
