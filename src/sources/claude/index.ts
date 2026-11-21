@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { from } from "functools";
 import type { ResumeTarget } from "../../domain/resume";
@@ -24,6 +25,8 @@ import {
   parseJsonLine,
   readFileBytes,
   readJsonlObjects,
+  readJsonlTail,
+  streamJsonlObjects,
 } from "../../shared/jsonl";
 import { isMetaOrCommand, singleLine } from "../../shared/messages";
 import { HOME, tildify } from "../../shared/paths";
@@ -31,6 +34,8 @@ import type { SessionSource } from "../session-source";
 
 const CLAUDE_DIR = join(HOME, ".claude", "projects");
 const SKILL_EVAL_COMMAND = /-skill-[0-9a-f]{8}$/;
+/** Bytes read from the end of a session file for its last activity, doubled while too few. */
+const CLOSING_WINDOW_BYTES = 64 * 1024;
 
 export const claudeSource: SessionSource = {
   source: "claude",
@@ -159,10 +164,56 @@ export function getClaudeResumeTarget(session: SessionSummary): ResumeTarget {
   };
 }
 
+/**
+ * The summary of a session file, read from its opening exchange and its last
+ * lines rather than in full. Timestamps are close to append order, so the
+ * earliest and latest of those records stand in for the file's.
+ */
 export async function parseClaudeSession(
   filePath: string,
 ): Promise<SessionSummary | null> {
-  return parseClaudeRecords(filePath, await readClaudeRecords(filePath));
+  try {
+    const { size } = await stat(filePath);
+    if (size <= CLOSING_WINDOW_BYTES) {
+      return parseClaudeRecords(filePath, await readClaudeRecords(filePath));
+    }
+    const [opening, closing] = await Promise.all([
+      readOpeningRecords(filePath),
+      readClosingRecords(filePath, size, CLOSING_WINDOW_BYTES),
+    ]);
+    return parseClaudeRecords(filePath, opening, closing);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The records up to the first reply to a prompt, or every record if none is
+ * answered. Everything a summary takes from a session but its last activity,
+ * startup attachments such as the skill listing included, is written by then.
+ */
+async function readOpeningRecords(filePath: string): Promise<JsonlRecord[]> {
+  const records: JsonlRecord[] = [];
+  let prompted = false;
+  for await (const record of streamJsonlObjects(filePath, asClaudeRecord)) {
+    records.push(record);
+    prompted ||= promptText(record) !== null;
+    if (prompted && record.type === "assistant") break;
+  }
+  return records;
+}
+
+/** The records on a file's last lines, widened until one carries a timestamp or the window covers the file. */
+async function readClosingRecords(
+  filePath: string,
+  size: number,
+  window: number,
+): Promise<JsonlRecord[]> {
+  const records = await readJsonlTail(filePath, window, asClaudeRecord);
+  if (window >= size || records.some((record) => record.timestamp)) {
+    return records;
+  }
+  return readClosingRecords(filePath, size, window * 2);
 }
 
 function transcriptEntriesForRecord(record: JsonlRecord): TranscriptEntry[] {
@@ -212,23 +263,19 @@ function transcriptEntriesForRecord(record: JsonlRecord): TranscriptEntry[] {
   });
 }
 
+/** A summary from a file's `opening` records, with `closing` records only widening its time span. */
 function parseClaudeRecords(
   filePath: string,
-  records: readonly JsonlRecord[],
+  opening: readonly JsonlRecord[],
+  closing: readonly JsonlRecord[] = [],
 ): SessionSummary | null {
-  const timestamps = records
+  const timestamps = [...opening, ...closing]
     .flatMap((record) => (record.timestamp ? [record.timestamp] : []))
     .sort();
-  const userRecords = records.filter((record) => record.type === "user");
+  const userRecords = opening.filter((record) => record.type === "user");
 
   const sessionId = userRecords.find((record) => record.sessionId)?.sessionId;
-  const firstMessage = userRecords
-    .flatMap((record) =>
-      !record.isMeta && record.message?.role === "user"
-        ? [cleanMessageContent(record.message.content)]
-        : [],
-    )
-    .find((text) => !isMetaOrCommand(text));
+  const firstMessage = opening.map(promptText).find((text) => text !== null);
   if (!sessionId || !firstMessage) return null;
 
   const cwd = userRecords.find((record) => record.cwd)?.cwd ?? "";
@@ -246,8 +293,16 @@ function parseClaudeRecords(
     startedAt: timestamps[0] ?? "",
     lastActiveAt: timestamps.at(-1) ?? "",
     backingRef: filePath,
-    skillEval: isSkillEval(records, userRecords),
+    skillEval: isSkillEval(opening, userRecords),
   };
+}
+
+/** The text of a prompt the user typed, or null for any other record. */
+function promptText(record: JsonlRecord): string | null {
+  if (record.type !== "user" || record.isMeta) return null;
+  if (record.message?.role !== "user") return null;
+  const text = cleanMessageContent(record.message.content);
+  return isMetaOrCommand(text) ? null : text;
 }
 
 /** Headless (`claude -p`) sessions that loaded a temporary skill-eval command. */
