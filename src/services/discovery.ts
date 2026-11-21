@@ -11,14 +11,3 @@ export async function discoverSessions(
     result.status === "fulfilled" ? [...result.value] : [],
   );
 }
-
-export function findSessionById(
-  sessions: readonly SessionSummary[],
-  sessionId: string,
-): SessionSummary | null {
-  return (
-    sessions.find(
-      (session) => session.id === sessionId || session.id.startsWith(sessionId),
-    ) ?? null
-  );
-}

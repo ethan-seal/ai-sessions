@@ -9,6 +9,6 @@ export interface SessionSource {
 
   discoverSessions(): Promise<readonly SessionSummary[]>;
   search(term: ParsedSearchTerm): Promise<readonly SearchResult[]>;
-  loadTranscript(sessionId: string): Promise<Transcript>;
-  getResumeTarget(sessionId: string): Promise<ResumeTarget | null>;
+  loadTranscript(session: SessionSummary): Promise<Transcript>;
+  getResumeTarget(session: SessionSummary): Promise<ResumeTarget | null>;
 }

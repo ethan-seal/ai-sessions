@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "ai-sessions",
+      "dependencies": {
+        "functools": "git+ssh://git@github.com/ethan-seal/functools",
+      },
       "devDependencies": {
         "bun-types": "^1.3.11",
         "typescript": "^6.0.3",
@@ -14,6 +17,8 @@
     "@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
     "bun-types": ["bun-types@1.3.11", "", { "dependencies": { "@types/node": "*" } }, "sha512-1KGPpoxQWl9f6wcZh57LvrPIInQMn2TQ7jsgxqpRzg+l0QPOFvJVH7HmvHo/AiPgwXy+/Thf6Ov3EdVn1vOabg=="],
+
+    "functools": ["functools@git+ssh://git@github.com/ethan-seal/functools#acb63b5962944100e3890aef359e26ab782fcd5a", {}, "acb63b5962944100e3890aef359e26ab782fcd5a"],
 
     "typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 

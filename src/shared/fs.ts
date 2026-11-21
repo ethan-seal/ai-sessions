@@ -1,17 +1,20 @@
-import { readdirSync, statSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 
-export function safeReaddir(dirPath: string): string[] {
+export async function safeReaddir(dirPath: string): Promise<string[]> {
   try {
-    return readdirSync(dirPath);
+    return await readdir(dirPath);
   } catch {
     return [];
   }
 }
 
-export function isDirectory(path: string): boolean {
+export async function isDirectory(path: string): Promise<boolean> {
   try {
-    return statSync(path).isDirectory();
+    return (await stat(path)).isDirectory();
   } catch {
     return false;
   }
 }
+
+/** How many files are read at once while scanning session history. */
+export const FILE_READ_CONCURRENCY = 16;

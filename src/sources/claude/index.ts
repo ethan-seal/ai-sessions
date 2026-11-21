@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
+import { from } from "functools";
 import type { ResumeTarget } from "../../domain/resume";
 import type {
   ParsedSearchTerm,
@@ -9,8 +10,13 @@ import type {
 import { matchesTerm } from "../../domain/search";
 import type { SessionSummary } from "../../domain/session";
 import type { Transcript, TranscriptEntry } from "../../domain/transcript";
-import { isDirectory, safeReaddir } from "../../shared/fs";
+import {
+  FILE_READ_CONCURRENCY,
+  isDirectory,
+  safeReaddir,
+} from "../../shared/fs";
 import { readJsonlObjects } from "../../shared/jsonl";
+import { isMetaOrCommand, singleLine } from "../../shared/messages";
 import { HOME, tildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
 
@@ -25,11 +31,11 @@ export const claudeSource: SessionSource = {
   async search(term) {
     return searchClaudeSessions(term);
   },
-  async loadTranscript(sessionId) {
-    return loadClaudeTranscript(sessionId);
+  async loadTranscript(session) {
+    return loadClaudeTranscript(session);
   },
-  async getResumeTarget(sessionId) {
-    return getClaudeResumeTarget(sessionId);
+  async getResumeTarget(session) {
+    return getClaudeResumeTarget(session);
   },
 };
 
@@ -65,89 +71,75 @@ interface JsonlRecord {
   };
 }
 
-export function getClaudeJsonlPaths(): string[] {
-  if (!existsSync(CLAUDE_DIR)) return [];
-
-  return safeReaddir(CLAUDE_DIR)
+export async function getClaudeJsonlPaths(): Promise<string[]> {
+  return from(await safeReaddir(CLAUDE_DIR))
     .map((dir) => join(CLAUDE_DIR, dir))
     .filter(isDirectory)
-    .flatMap((dirPath) =>
-      safeReaddir(dirPath)
+    .flatMap(async (dirPath) =>
+      (await safeReaddir(dirPath))
         .filter((file) => file.endsWith(".jsonl") && !file.startsWith("agent-"))
         .map((file) => join(dirPath, file)),
-    );
-}
-
-export function discoverClaudeSessions(): SessionSummary[] {
-  return getClaudeJsonlPaths()
-    .map(parseClaudeSession)
-    .filter((session): session is SessionSummary => session !== null);
-}
-
-export function searchClaudeSessions(term: ParsedSearchTerm): SearchResult[] {
-  const results: SearchResult[] = [];
-
-  for (const filePath of getClaudeJsonlPaths()) {
-    const records = readClaudeRecords(filePath);
-    const session = parseClaudeRecords(filePath, records);
-    if (!session) continue;
-
-    for (const record of records) {
-      const matchRole = matchRoleInRecord(record, term);
-      if (!matchRole) continue;
-
-      const extracted = extractSearchableText(record);
-      const matchedText = extracted
-        ? extracted.text.replace(/\n/g, " ").trim()
-        : "";
-      results.push({
-        session,
-        matchRole,
-        preview: matchedText,
-        matchedText,
-      });
-      break;
-    }
-  }
-
-  return results;
-}
-
-export function loadClaudeTranscript(sessionId: string): Transcript {
-  for (const filePath of getClaudeJsonlPaths()) {
-    const records = readClaudeRecords(filePath);
-    const session = parseClaudeRecords(filePath, records);
-    if (
-      !session ||
-      (session.id !== sessionId && !session.id.startsWith(sessionId))
     )
-      continue;
-
-    return {
-      session,
-      entries: records.flatMap(transcriptEntriesForRecord),
-    };
-  }
-
-  throw new Error(`Claude session not found: ${sessionId}`);
+    .toArray();
 }
 
-export function getClaudeResumeTarget(sessionId: string): ResumeTarget {
-  const session = discoverClaudeSessions().find(
-    (candidate) =>
-      candidate.id === sessionId || candidate.id.startsWith(sessionId),
-  );
+export async function discoverClaudeSessions(): Promise<SessionSummary[]> {
+  return from(await getClaudeJsonlPaths())
+    .mapConcurrent(parseClaudeSession, { limit: FILE_READ_CONCURRENCY })
+    .filter((session): session is SessionSummary => session !== null)
+    .toArray();
+}
 
+export async function searchClaudeSessions(
+  term: ParsedSearchTerm,
+): Promise<SearchResult[]> {
+  return from(await getClaudeJsonlPaths())
+    .mapConcurrent((filePath) => searchClaudeFile(filePath, term), {
+      limit: FILE_READ_CONCURRENCY,
+    })
+    .filter((result): result is SearchResult => result !== null)
+    .toArray();
+}
+
+async function searchClaudeFile(
+  filePath: string,
+  term: ParsedSearchTerm,
+): Promise<SearchResult | null> {
+  const records = await readClaudeRecords(filePath);
+  const session = parseClaudeRecords(filePath, records);
+  if (!session) return null;
+
+  for (const record of records) {
+    const matchRole = matchRoleInRecord(record, term);
+    if (!matchRole) continue;
+
+    const extracted = extractSearchableText(record);
+    const matchedText = extracted ? singleLine(extracted.text) : "";
+    return { session, matchRole, preview: matchedText, matchedText };
+  }
+  return null;
+}
+
+export async function loadClaudeTranscript(
+  session: SessionSummary,
+): Promise<Transcript> {
+  const records = await readClaudeRecords(session.backingRef);
+  return { session, entries: records.flatMap(transcriptEntriesForRecord) };
+}
+
+export function getClaudeResumeTarget(session: SessionSummary): ResumeTarget {
   return {
     source: "claude",
     executable: "claude",
-    args: ["--dangerously-skip-permissions", "--resume", sessionId],
-    cwd: session?.cwd || session?.projectDir || "",
+    args: ["--dangerously-skip-permissions", "--resume", session.id],
+    cwd: session.cwd,
   };
 }
 
-export function parseClaudeSession(filePath: string): SessionSummary | null {
-  return parseClaudeRecords(filePath, readClaudeRecords(filePath));
+export async function parseClaudeSession(
+  filePath: string,
+): Promise<SessionSummary | null> {
+  return parseClaudeRecords(filePath, await readClaudeRecords(filePath));
 }
 
 function transcriptEntriesForRecord(record: JsonlRecord): TranscriptEntry[] {
@@ -201,56 +193,25 @@ function parseClaudeRecords(
   filePath: string,
   records: readonly JsonlRecord[],
 ): SessionSummary | null {
-  if (records.length === 0) return null;
+  const timestamps = records
+    .flatMap((record) => (record.timestamp ? [record.timestamp] : []))
+    .sort();
+  const userRecords = records.filter((record) => record.type === "user");
 
-  let sessionId = "";
-  let cwd = "";
-  let startTime = "";
-  let endTime = "";
-  let firstMessage = "";
-  let headless = false;
-  let hasEvalCommand = false;
-
-  for (const record of records) {
-    if (record.timestamp) {
-      if (!startTime || record.timestamp < startTime)
-        startTime = record.timestamp;
-      if (!endTime || record.timestamp > endTime) endTime = record.timestamp;
-    }
-
-    if (record.type === "user" && record.sessionId && !sessionId) {
-      sessionId = record.sessionId;
-    }
-    if (record.type === "user" && record.cwd && !cwd) {
-      cwd = record.cwd;
-    }
-    if (record.type === "user" && record.entrypoint === "sdk-cli") {
-      headless = true;
-    }
-    if (
-      record.attachment?.type === "skill_listing" &&
-      record.attachment.names?.some((name) => SKILL_EVAL_COMMAND.test(name))
-    ) {
-      hasEvalCommand = true;
-    }
-
-    if (
-      record.type === "user" &&
-      !record.isMeta &&
-      record.message?.role === "user" &&
-      !firstMessage
-    ) {
-      const text = cleanMessageContent(record.message.content);
-      if (!isMetaOrCommand(text)) {
-        firstMessage = text;
-      }
-    }
-  }
-
+  const sessionId = userRecords.find((record) => record.sessionId)?.sessionId;
+  const firstMessage = userRecords
+    .flatMap((record) =>
+      !record.isMeta && record.message?.role === "user"
+        ? [cleanMessageContent(record.message.content)]
+        : [],
+    )
+    .find((text) => !isMetaOrCommand(text));
   if (!sessionId || !firstMessage) return null;
 
-  const projectDirName = basename(join(filePath, ".."));
-  const projectDir = cwd ? tildify(cwd) : dirNameToPath(projectDirName);
+  const cwd = userRecords.find((record) => record.cwd)?.cwd ?? "";
+  const projectDir = cwd
+    ? tildify(cwd)
+    : dirNameToPath(basename(join(filePath, "..")));
 
   return {
     id: sessionId,
@@ -258,15 +219,31 @@ function parseClaudeRecords(
     projectDir,
     cwd,
     title: "",
-    firstMessage: firstMessage.replace(/\n/g, " ").trim(),
-    startedAt: startTime,
-    lastActiveAt: endTime,
+    firstMessage: singleLine(firstMessage),
+    startedAt: timestamps[0] ?? "",
+    lastActiveAt: timestamps.at(-1) ?? "",
     backingRef: filePath,
-    skillEval: headless && hasEvalCommand,
+    skillEval: isSkillEval(records, userRecords),
   };
 }
 
-function readClaudeRecords(filePath: string): JsonlRecord[] {
+/** Headless (`claude -p`) sessions that loaded a temporary skill-eval command. */
+function isSkillEval(
+  records: readonly JsonlRecord[],
+  userRecords: readonly JsonlRecord[],
+): boolean {
+  const headless = userRecords.some(
+    (record) => record.entrypoint === "sdk-cli",
+  );
+  const hasEvalCommand = records.some((record) =>
+    record.attachment?.type === "skill_listing"
+      ? record.attachment.names?.some((name) => SKILL_EVAL_COMMAND.test(name))
+      : false,
+  );
+  return headless && hasEvalCommand;
+}
+
+function readClaudeRecords(filePath: string): Promise<JsonlRecord[]> {
   return readJsonlObjects(filePath, (value) => value as JsonlRecord);
 }
 
@@ -384,18 +361,6 @@ function matchRoleInRecord(
   }
 
   return null;
-}
-
-function isMetaOrCommand(text: string): boolean {
-  return (
-    text.startsWith("<command-name>") ||
-    text.startsWith("<command-message>") ||
-    text.startsWith("<environment_context>") ||
-    text.startsWith("<turn_aborted>") ||
-    text.startsWith("<local-command-stdout>") ||
-    text.startsWith("Caveat: The messages below") ||
-    text.trim() === ""
-  );
 }
 
 function dirNameToPath(dirName: string): string {

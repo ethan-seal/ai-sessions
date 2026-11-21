@@ -6,6 +6,7 @@ import type { ParsedSearchTerm, SearchResult } from "../../domain/search";
 import { matchesTerm } from "../../domain/search";
 import type { SessionSummary } from "../../domain/session";
 import type { Transcript, TranscriptEntry } from "../../domain/transcript";
+import { singleLine } from "../../shared/messages";
 import { HOME, tildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
 
@@ -20,12 +21,7 @@ interface OpencodeSessionRow {
   first_message: string | null;
 }
 
-interface OpencodeSearchRow {
-  id: string;
-  directory: string;
-  title: string | null;
-  time_created: number;
-  time_updated: number;
+interface OpencodeSearchRow extends OpencodeSessionRow {
   match_role: string;
   match_text: string;
 }
@@ -37,8 +33,21 @@ interface OpencodeMessageRow {
 }
 
 interface OpencodePartRow {
+  message_id: string;
   data: string;
 }
+
+/** Text of the earliest user message in session `s`; shared by listing and search. */
+const FIRST_MESSAGE_SQL = `(
+  SELECT json_extract(p.data, '$.text')
+  FROM message m
+  JOIN part p ON p.message_id = m.id
+  WHERE m.session_id = s.id
+    AND json_extract(m.data, '$.role') = 'user'
+    AND json_extract(p.data, '$.type') = 'text'
+  ORDER BY m.time_created ASC, p.time_created ASC
+  LIMIT 1
+)`;
 
 export const opencodeSource: SessionSource = {
   source: "opencode",
@@ -48,11 +57,11 @@ export const opencodeSource: SessionSource = {
   async search(term) {
     return searchOpencodeSessions(term);
   },
-  async loadTranscript(sessionId) {
-    return loadOpencodeTranscript(sessionId);
+  async loadTranscript(session) {
+    return loadOpencodeTranscript(session);
   },
-  async getResumeTarget(sessionId) {
-    return getOpencodeResumeTarget(sessionId);
+  async getResumeTarget(session) {
+    return getOpencodeResumeTarget(session);
   },
 };
 
@@ -69,16 +78,7 @@ export function discoverOpencodeSessions(): SessionSummary[] {
         s.title,
         s.time_created,
         s.time_updated,
-        (
-          SELECT json_extract(p.data, '$.text')
-          FROM message m
-          JOIN part p ON p.message_id = m.id
-          WHERE m.session_id = s.id
-            AND json_extract(m.data, '$.role') = 'user'
-            AND json_extract(p.data, '$.type') = 'text'
-          ORDER BY m.time_created ASC, p.time_created ASC
-          LIMIT 1
-        ) as first_message
+        ${FIRST_MESSAGE_SQL} as first_message
       FROM session s
       WHERE s.time_archived IS NULL
       ORDER BY s.time_updated DESC
@@ -104,6 +104,7 @@ export function searchOpencodeSessions(term: ParsedSearchTerm): SearchResult[] {
         s.title,
         s.time_created,
         s.time_updated,
+        ${FIRST_MESSAGE_SQL} as first_message,
         json_extract(m.data, '$.role') as match_role,
         json_extract(p.data, '$.text') as match_text
       FROM session s
@@ -124,10 +125,10 @@ export function searchOpencodeSessions(term: ParsedSearchTerm): SearchResult[] {
       )
         return [];
 
-      const matchedText = row.match_text.replace(/\n/g, " ").trim();
+      const matchedText = singleLine(row.match_text);
       return [
         {
-          session: sessionFromSearchRow(row),
+          session: sessionFromRow(row),
           matchRole: row.match_role === "user" ? "user" : "assistant",
           preview: matchedText,
           matchedText,
@@ -139,30 +140,38 @@ export function searchOpencodeSessions(term: ParsedSearchTerm): SearchResult[] {
   }
 }
 
-export function loadOpencodeTranscript(sessionId: string): Transcript {
+export function loadOpencodeTranscript(session: SessionSummary): Transcript {
   const db = openOpencodeDb();
   if (!db) throw new Error("Could not open OpenCode database");
 
   try {
-    const session = discoverOpencodeSessions().find(
-      (candidate) =>
-        candidate.id === sessionId || candidate.id.startsWith(sessionId),
-    );
-    if (!session) throw new Error(`OpenCode session not found: ${sessionId}`);
-
     const messages = db
       .query(`
-      SELECT m.id, m.data, m.time_created
-      FROM message m
-      WHERE m.session_id = $sessionId
-      ORDER BY m.time_created ASC
+      SELECT id, data, time_created
+      FROM message
+      WHERE session_id = $sessionId
+      ORDER BY time_created ASC
     `)
       .all({ $sessionId: session.id }) as OpencodeMessageRow[];
+
+    const parts = db
+      .query(`
+      SELECT message_id, data
+      FROM part
+      WHERE session_id = $sessionId
+      ORDER BY time_created ASC
+    `)
+      .all({ $sessionId: session.id }) as OpencodePartRow[];
+
+    const partsByMessage = Map.groupBy(parts, (part) => part.message_id);
 
     return {
       session,
       entries: messages.flatMap((message) =>
-        transcriptEntriesForMessage(db, message),
+        transcriptEntriesForMessage(
+          message,
+          partsByMessage.get(message.id) ?? [],
+        ),
       ),
     };
   } finally {
@@ -170,17 +179,12 @@ export function loadOpencodeTranscript(sessionId: string): Transcript {
   }
 }
 
-export function getOpencodeResumeTarget(sessionId: string): ResumeTarget {
-  const session = discoverOpencodeSessions().find(
-    (candidate) =>
-      candidate.id === sessionId || candidate.id.startsWith(sessionId),
-  );
-
+export function getOpencodeResumeTarget(session: SessionSummary): ResumeTarget {
   return {
     source: "opencode",
     executable: "opencode",
-    args: ["--session", sessionId],
-    cwd: session?.cwd || session?.projectDir || "",
+    args: ["--session", session.id],
+    cwd: session.cwd,
   };
 }
 
@@ -201,22 +205,7 @@ function sessionFromRow(row: OpencodeSessionRow): SessionSummary {
     projectDir: tildify(row.directory),
     cwd: row.directory,
     title: row.title || "",
-    firstMessage: (row.first_message || "").replace(/\n/g, " ").trim(),
-    startedAt: new Date(row.time_created).toISOString(),
-    lastActiveAt: new Date(row.time_updated).toISOString(),
-    backingRef: "",
-    skillEval: false,
-  };
-}
-
-function sessionFromSearchRow(row: OpencodeSearchRow): SessionSummary {
-  return {
-    id: row.id,
-    source: "opencode",
-    projectDir: tildify(row.directory),
-    cwd: row.directory,
-    title: row.title || "",
-    firstMessage: row.match_text.replace(/\n/g, " ").trim(),
+    firstMessage: singleLine(row.first_message || ""),
     startedAt: new Date(row.time_created).toISOString(),
     lastActiveAt: new Date(row.time_updated).toISOString(),
     backingRef: "",
@@ -225,30 +214,21 @@ function sessionFromSearchRow(row: OpencodeSearchRow): SessionSummary {
 }
 
 function transcriptEntriesForMessage(
-  db: Database,
   message: OpencodeMessageRow,
+  parts: readonly OpencodePartRow[],
 ): TranscriptEntry[] {
   const role = opencodeMessageRole(message.data);
   if (!role) return [];
 
-  const parts = db
-    .query(`
-    SELECT data FROM part
-    WHERE message_id = $messageId
-    ORDER BY time_created ASC
-  `)
-    .all({ $messageId: message.id }) as OpencodePartRow[];
-
+  const timestamp = new Date(message.time_created).toISOString();
   const text = parts.flatMap(textFromPart).join("\n").trim();
-  if (!text) return [];
-
-  return [
-    {
-      timestamp: new Date(message.time_created).toISOString(),
-      role,
-      text,
-    },
-  ];
+  const textEntries: TranscriptEntry[] = text
+    ? [{ timestamp, role, text }]
+    : [];
+  const toolEntries = parts.flatMap((part) =>
+    toolEntriesFromPart(part, timestamp),
+  );
+  return [...textEntries, ...toolEntries];
 }
 
 function opencodeMessageRole(data: string): "user" | "assistant" | null {
@@ -270,6 +250,43 @@ function textFromPart(part: OpencodePartRow): string[] {
     return parsed.type === "text" && typeof parsed.text === "string"
       ? [parsed.text]
       : [];
+  } catch {
+    return [];
+  }
+}
+
+function toolEntriesFromPart(
+  part: OpencodePartRow,
+  timestamp: string,
+): TranscriptEntry[] {
+  try {
+    const parsed = JSON.parse(part.data) as {
+      type?: unknown;
+      tool?: unknown;
+      state?: { input?: unknown; output?: unknown };
+    };
+    if (parsed.type !== "tool") return [];
+
+    const toolName =
+      typeof parsed.tool === "string" ? parsed.tool : "unknown_tool";
+    const output = parsed.state?.output;
+    return [
+      {
+        timestamp,
+        role: "tool_call",
+        text: JSON.stringify(parsed.state?.input ?? {}, null, 2),
+        toolName,
+      },
+      ...(typeof output === "string" && output
+        ? [
+            {
+              timestamp,
+              role: "tool_result",
+              text: output,
+            } satisfies TranscriptEntry,
+          ]
+        : []),
+    ];
   } catch {
     return [];
   }

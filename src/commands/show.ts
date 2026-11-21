@@ -1,6 +1,7 @@
+import { findSessionById } from "../domain/session";
 import { renderTranscript } from "../output/human";
 import { outputViaPager } from "../output/pager";
-import { discoverSessions, findSessionById } from "../services/discovery";
+import { discoverSessions } from "../services/discovery";
 import { getSessionSources } from "../services/source-registry";
 import { loadTranscript } from "../services/transcript";
 

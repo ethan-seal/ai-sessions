@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { discoverSessions, findSessionById } from "../services/discovery";
+import { findSessionById } from "../domain/session";
+import { discoverSessions } from "../services/discovery";
 import { getResumeTarget } from "../services/resume";
 import { getSessionSources } from "../services/source-registry";
 import { untildify } from "../shared/paths";

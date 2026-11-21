@@ -10,5 +10,5 @@ export async function loadTranscript(
     (candidate) => candidate.source === session.source,
   );
   if (!source) throw new Error(`No source registered for ${session.source}`);
-  return source.loadTranscript(session.id);
+  return source.loadTranscript(session);
 }

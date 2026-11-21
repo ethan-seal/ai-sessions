@@ -1,5 +1,6 @@
 import type { ResumeTarget } from "../domain/resume";
 import type { SessionSummary } from "../domain/session";
+import { untildify } from "../shared/paths";
 import type { SessionSource } from "../sources/session-source";
 
 export async function getResumeTarget(
@@ -11,19 +12,19 @@ export async function getResumeTarget(
   );
   if (!source) throw new Error(`No source registered for ${session.source}`);
 
-  const target = await source.getResumeTarget(session.id);
+  const target = await source.getResumeTarget(session);
   if (!target) {
     return {
       source: session.source,
       executable: "",
       args: [],
-      cwd: session.cwd || session.projectDir,
+      cwd: session.cwd || untildify(session.projectDir),
       unavailableReason: `Resume is unavailable for ${session.source}`,
     };
   }
 
   return {
     ...target,
-    cwd: target.cwd || session.cwd || session.projectDir,
+    cwd: target.cwd || session.cwd || untildify(session.projectDir),
   };
 }

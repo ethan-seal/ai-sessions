@@ -1,12 +1,12 @@
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
-export function readJsonlObjects<T>(
+export async function readJsonlObjects<T>(
   filePath: string,
   parse: (value: unknown) => T | null,
-): T[] {
+): Promise<T[]> {
   let data: string;
   try {
-    data = readFileSync(filePath, "utf-8");
+    data = await readFile(filePath, "utf-8");
   } catch {
     return [];
   }

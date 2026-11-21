@@ -1,13 +1,19 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { from } from "functools";
 import type { ResumeTarget } from "../../domain/resume";
 import type { ParsedSearchTerm, SearchResult } from "../../domain/search";
 import { matchesTerm } from "../../domain/search";
 import type { SessionSummary } from "../../domain/session";
 import type { Transcript, TranscriptEntry } from "../../domain/transcript";
-import { isDirectory, safeReaddir } from "../../shared/fs";
+import {
+  FILE_READ_CONCURRENCY,
+  isDirectory,
+  safeReaddir,
+} from "../../shared/fs";
 import { readJsonlObjects } from "../../shared/jsonl";
+import { isMetaOrCommand, singleLine } from "../../shared/messages";
 import { HOME, tildify, untildify } from "../../shared/paths";
 import type { SessionSource } from "../session-source";
 
@@ -49,81 +55,83 @@ export const codexSource: SessionSource = {
   async search(term) {
     return searchCodexSessions(term);
   },
-  async loadTranscript(sessionId) {
-    return loadCodexTranscript(sessionId);
+  async loadTranscript(session) {
+    return loadCodexTranscript(session);
   },
-  async getResumeTarget(sessionId) {
-    return getCodexResumeTarget(sessionId);
+  async getResumeTarget(session) {
+    return getCodexResumeTarget(session);
   },
 };
 
-export function discoverCodexSessions(): SessionSummary[] {
+export async function discoverCodexSessions(): Promise<SessionSummary[]> {
   const dbSessions = getCodexSessionsFromDb();
   if (dbSessions.length > 0) return dbSessions;
 
-  return getCodexRolloutPaths()
-    .map(parseCodexSession)
-    .filter((session): session is SessionSummary => session !== null);
+  return from(await getCodexRolloutPaths())
+    .mapConcurrent(parseCodexSession, { limit: FILE_READ_CONCURRENCY })
+    .filter((session): session is SessionSummary => session !== null)
+    .toArray();
 }
 
-export function searchCodexSessions(term: ParsedSearchTerm): SearchResult[] {
+export async function searchCodexSessions(
+  term: ParsedSearchTerm,
+): Promise<SearchResult[]> {
   const sessions = new Map(
-    discoverCodexSessions().map((session) => [session.backingRef, session]),
+    (await discoverCodexSessions()).map((session) => [
+      session.backingRef,
+      session,
+    ]),
   );
-  const results: SearchResult[] = [];
 
-  for (const filePath of getCodexRolloutPaths()) {
-    const records = readCodexRecords(filePath);
-    const session = sessions.get(filePath) || parseCodexSession(filePath);
-    if (!session) continue;
-
-    for (const record of records) {
-      const entry = codexSearchEntry(record);
-      if (!entry || !matchesTerm(entry.text, term)) continue;
-
-      const matchedText = entry.text.replace(/\n/g, " ").trim();
-      results.push({
-        session,
-        matchRole: entry.role === "tool" ? "tool" : entry.role,
-        preview: matchedText,
-        matchedText,
-      });
-      break;
-    }
-  }
-
-  return results;
+  return from(await getCodexRolloutPaths())
+    .mapConcurrent(
+      async (filePath) => {
+        const [records, session] = await Promise.all([
+          readCodexRecords(filePath),
+          sessions.get(filePath) ?? parseCodexSession(filePath),
+        ]);
+        return session ? searchCodexRecords(session, records, term) : null;
+      },
+      { limit: FILE_READ_CONCURRENCY },
+    )
+    .filter((result): result is SearchResult => result !== null)
+    .toArray();
 }
 
-export function loadCodexTranscript(sessionId: string): Transcript {
-  const session = discoverCodexSessions().find(
-    (candidate) =>
-      candidate.id === sessionId || candidate.id.startsWith(sessionId),
-  );
-  if (!session) throw new Error(`Codex session not found: ${sessionId}`);
+function searchCodexRecords(
+  session: SessionSummary,
+  records: readonly CodexRecord[],
+  term: ParsedSearchTerm,
+): SearchResult | null {
+  const hit = records
+    .map(codexSearchEntry)
+    .find((entry) => entry !== null && matchesTerm(entry.text, term));
+  if (!hit) return null;
 
-  const records = readCodexRecords(session.backingRef);
+  const matchedText = singleLine(hit.text);
+  return { session, matchRole: hit.role, preview: matchedText, matchedText };
+}
+
+export async function loadCodexTranscript(
+  session: SessionSummary,
+): Promise<Transcript> {
+  const records = await readCodexRecords(session.backingRef);
   return {
     session,
     entries: codexDisplayEntries(records).map(toTranscriptEntry),
   };
 }
 
-export function getCodexResumeTarget(sessionId: string): ResumeTarget {
-  const session = discoverCodexSessions().find(
-    (candidate) =>
-      candidate.id === sessionId || candidate.id.startsWith(sessionId),
-  );
-
+export function getCodexResumeTarget(session: SessionSummary): ResumeTarget {
   return {
     source: "codex",
     executable: "codex",
-    args: ["resume", sessionId],
-    cwd: session?.cwd || session?.projectDir || "",
+    args: ["resume", session.id],
+    cwd: session.cwd,
   };
 }
 
-function readCodexRecords(filePath: string): CodexRecord[] {
+function readCodexRecords(filePath: string): Promise<CodexRecord[]> {
   return readJsonlObjects(filePath, (value) => {
     const raw = asObject(value);
     if (!raw || typeof raw.type !== "string") return null;
@@ -170,7 +178,7 @@ function getCodexSessionsFromDb(): SessionSummary[] {
       projectDir: tildify(row.cwd),
       cwd: row.cwd,
       title: row.title || "",
-      firstMessage: (row.first_user_message || "").replace(/\n/g, " ").trim(),
+      firstMessage: singleLine(row.first_user_message || ""),
       startedAt: codexIsoFromTime(row.created_at_ms, row.created_at),
       lastActiveAt: codexIsoFromTime(row.updated_at_ms, row.updated_at),
       backingRef: row.rollout_path,
@@ -181,57 +189,52 @@ function getCodexSessionsFromDb(): SessionSummary[] {
   }
 }
 
-export function getCodexRolloutPaths(): string[] {
-  if (!existsSync(CODEX_SESSIONS_DIR)) return [];
-
-  const walk = (dirPath: string): string[] =>
-    safeReaddir(dirPath).flatMap((name) => {
-      const path = join(dirPath, name);
-      if (isDirectory(path)) return walk(path);
-      return name.startsWith("rollout-") && name.endsWith(".jsonl")
-        ? [path]
-        : [];
-    });
+export async function getCodexRolloutPaths(): Promise<string[]> {
+  const walk = async (dirPath: string): Promise<string[]> =>
+    from(await safeReaddir(dirPath))
+      .map((name) => join(dirPath, name))
+      .flatMap(async (path) => {
+        if (await isDirectory(path)) return walk(path);
+        const name = basename(path);
+        return name.startsWith("rollout-") && name.endsWith(".jsonl")
+          ? [path]
+          : [];
+      })
+      .toArray();
 
   return walk(CODEX_SESSIONS_DIR);
 }
 
-function parseCodexSession(filePath: string): SessionSummary | null {
-  const records = readCodexRecords(filePath);
-  if (records.length === 0) return null;
+async function parseCodexSession(
+  filePath: string,
+): Promise<SessionSummary | null> {
+  const records = await readCodexRecords(filePath);
+  const meta = records
+    .filter((record) => record.type === "session_meta" && record.payload)
+    .map((record) => record.payload)
+    .filter((payload) => payload !== undefined);
 
-  let sessionId = "";
-  let cwd = "";
-  let startTime = "";
-  let endTime = "";
-
-  for (const record of records) {
-    if (record.timestamp) {
-      if (!startTime || record.timestamp < startTime)
-        startTime = record.timestamp;
-      if (!endTime || record.timestamp > endTime) endTime = record.timestamp;
-    }
-
-    if (record.type === "session_meta" && record.payload) {
-      if (!sessionId) sessionId = stringValue(record.payload.id);
-      if (!cwd) cwd = stringValue(record.payload.cwd);
-      const created = stringValue(record.payload.timestamp);
-      if (created && (!startTime || created < startTime)) startTime = created;
-    }
-  }
-
+  const sessionId = meta.map((m) => stringValue(m.id)).find(Boolean);
   const firstMessage = codexFirstUserMessage(records);
   if (!sessionId || !firstMessage) return null;
+
+  const cwd = meta.map((m) => stringValue(m.cwd)).find(Boolean) ?? "";
+  const timestamps = [
+    ...records.flatMap((record) =>
+      record.timestamp ? [record.timestamp] : [],
+    ),
+    ...meta.map((m) => stringValue(m.timestamp)).filter(Boolean),
+  ].sort();
 
   return {
     id: sessionId,
     source: "codex",
-    projectDir: cwd ? tildify(cwd) : tildify(join(filePath, "..")),
+    projectDir: cwd ? tildify(cwd) : tildify(dirname(filePath)),
     cwd,
     title: "",
     firstMessage,
-    startedAt: startTime,
-    lastActiveAt: endTime,
+    startedAt: timestamps[0] ?? "",
+    lastActiveAt: timestamps.at(-1) ?? "",
     backingRef: filePath,
     skillEval: false,
   };
@@ -338,7 +341,7 @@ function codexFirstUserMessage(records: readonly CodexRecord[]): string {
   for (const record of records) {
     const entry = codexSearchEntry(record);
     if (entry?.role === "user" && !isMetaOrCommand(entry.text)) {
-      return entry.text.replace(/\n/g, " ").trim();
+      return singleLine(entry.text);
     }
   }
   return "";
@@ -362,16 +365,4 @@ function asObject(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function isMetaOrCommand(text: string): boolean {
-  return (
-    text.startsWith("<command-name>") ||
-    text.startsWith("<command-message>") ||
-    text.startsWith("<environment_context>") ||
-    text.startsWith("<turn_aborted>") ||
-    text.startsWith("<local-command-stdout>") ||
-    text.startsWith("Caveat: The messages below") ||
-    text.trim() === ""
-  );
 }
