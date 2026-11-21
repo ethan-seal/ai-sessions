@@ -18,7 +18,7 @@
 
     "bun-types": ["bun-types@1.3.11", "", { "dependencies": { "@types/node": "*" } }, "sha512-1KGPpoxQWl9f6wcZh57LvrPIInQMn2TQ7jsgxqpRzg+l0QPOFvJVH7HmvHo/AiPgwXy+/Thf6Ov3EdVn1vOabg=="],
 
-    "functools": ["functools@git+ssh://git@github.com/ethan-seal/functools#acb63b5962944100e3890aef359e26ab782fcd5a", {}, "acb63b5962944100e3890aef359e26ab782fcd5a"],
+    "functools": ["functools@git+ssh://git@github.com/ethan-seal/functools#eaa56c7129a1d587fe631038b786152785547582", {}, "eaa56c7129a1d587fe631038b786152785547582"],
 
     "typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
